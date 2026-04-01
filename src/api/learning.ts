@@ -10,7 +10,8 @@ import type {
   VocabularyBookItem,
   TodaySentenceState,
   CustomWordInput,
-  AddWordResult
+  AddWordResult,
+  WordLookupResult
 } from '@/types'
 import { getSupabase } from '@/lib/supabase'
 
@@ -160,6 +161,56 @@ function toAIFeedback(raw: unknown): AIFeedback | null {
 }
 
 export const learningApi = {
+  async lookupWord(word: string): Promise<WordLookupResult> {
+    const userId = await getCurrentUserId()
+    const examType = await getExamType(userId)
+    const normalizedWord = word.trim().toLowerCase()
+    const supabase = getSupabase()
+
+    const { data: libraryRows, error: libraryError } = await supabase
+      .from('words')
+      .select('id,word,phonetic,meanings,examples,created_at')
+      .in('exam_type', [examType, 'both'])
+      .ilike('word', normalizedWord)
+      .limit(1)
+    if (libraryError) throw new Error(libraryError.message)
+    if (libraryRows && libraryRows.length > 0) {
+      const row = libraryRows[0] as WordRow
+      return {
+        found: true,
+        word: row.word,
+        source: 'library',
+        meanings: normalizeMeanings(row.meanings),
+        phonetic: row.phonetic || undefined
+      }
+    }
+
+    const { data: customRows, error: customError } = await supabase
+      .from('user_custom_words')
+      .select('word,phonetic,meanings')
+      .eq('user_id', userId)
+      .ilike('word', normalizedWord)
+      .limit(1)
+    if (customError) throw new Error(customError.message)
+    if (customRows && customRows.length > 0) {
+      const row = customRows[0] as { word: string; phonetic: string | null; meanings: unknown }
+      return {
+        found: true,
+        word: row.word,
+        source: 'custom',
+        meanings: normalizeMeanings(row.meanings),
+        phonetic: row.phonetic || undefined
+      }
+    }
+
+    return {
+      found: false,
+      word: normalizedWord,
+      meanings: [],
+      message: '词库暂无'
+    }
+  },
+
   async getTodayWords(type: 'new' | 'review'): Promise<Word[]> {
     const userId = await getCurrentUserId()
     const examType = await getExamType(userId)

@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLearningStore } from '@/stores/learning'
 import type { CustomWordInput } from '@/types'
+import { learningApi } from '@/api/learning'
 import AppButton from '@/components/common/AppButton.vue'
 
 const router = useRouter()
@@ -19,6 +20,13 @@ const customTranslation = ref('')
 const customPhonetic = ref('')
 const customPartOfSpeech = ref('')
 const customExamples = ref('')
+const lookupVisible = ref(false)
+const lookupLoading = ref(false)
+const lookupWord = ref('')
+const lookupPhonetic = ref('')
+const lookupSource = ref('')
+const lookupMeanings = ref<Array<{ partOfSpeech: string; definition: string }>>([])
+const lookupMessage = ref('')
 
 const sentence = computed(() => learningStore.todaySentence)
 const feedback = computed(() => learningStore.sentenceAIFeedback)
@@ -44,6 +52,31 @@ function selectWord(word: string) {
     return
   }
   selectedWords.value = [word]
+}
+
+async function handleWordClick(word: string) {
+  const cleanWord = word.replace(/[.,!?;:]/g, '').trim().toLowerCase()
+  if (!cleanWord) return
+  selectWord(cleanWord)
+  lookupVisible.value = true
+  lookupLoading.value = true
+  lookupWord.value = cleanWord
+  lookupPhonetic.value = ''
+  lookupSource.value = ''
+  lookupMeanings.value = []
+  lookupMessage.value = ''
+  try {
+    const result = await learningApi.lookupWord(cleanWord)
+    lookupWord.value = result.word
+    lookupPhonetic.value = result.phonetic || ''
+    lookupSource.value = result.source === 'custom' ? '私有词库' : result.source === 'library' ? '公共词库' : ''
+    lookupMeanings.value = result.meanings
+    lookupMessage.value = result.found ? '' : (result.message || '词库暂无')
+  } catch {
+    lookupMessage.value = '查询失败，请稍后重试'
+  } finally {
+    lookupLoading.value = false
+  }
 }
 
 async function addSelectedWordsToVocabulary() {
@@ -163,7 +196,7 @@ function splitSentence(text: string) {
               <span
                 v-for="(word, index) in splitSentence(sentence.content)"
                 :key="index"
-                @click="selectWord(word.replace(/[.,!?;:]/g, ''))"
+                @click="handleWordClick(word)"
                 class="cursor-pointer hover:text-primary transition-colors"
                 :class="{
                   'bg-sky-100 text-sky-700 px-1 rounded': selectedWords.includes(word.replace(/[.,!?;:]/g, ''))
@@ -190,6 +223,26 @@ function splitSentence(text: string) {
           <p v-if="addWordMessage" class="text-xs mt-2 text-primary">
             {{ addWordMessage }}
           </p>
+
+          <div v-if="lookupVisible" class="mt-3 relative">
+            <div class="absolute -top-2 left-6 w-3 h-3 bg-card border-l border-t border-border rotate-45" />
+            <div class="bg-card border border-border rounded-xl p-3">
+              <p class="text-xs text-muted-foreground mb-1">单词释义</p>
+              <p class="text-sm font-semibold text-foreground">
+                {{ lookupWord }} <span v-if="lookupPhonetic" class="text-xs text-muted-foreground ml-1">{{ lookupPhonetic }}</span>
+              </p>
+              <p v-if="lookupSource" class="text-[11px] text-primary mt-1">{{ lookupSource }}</p>
+              <p v-if="lookupLoading" class="text-xs text-muted-foreground mt-2">查询中...</p>
+              <template v-else>
+                <p v-if="lookupMessage" class="text-xs text-muted-foreground mt-2">{{ lookupMessage }}</p>
+                <ul v-else class="mt-2 space-y-1">
+                  <li v-for="(meaning, index) in lookupMeanings" :key="index" class="text-xs text-foreground">
+                    <span class="text-primary mr-1">{{ meaning.partOfSpeech }}</span>{{ meaning.definition }}
+                  </li>
+                </ul>
+              </template>
+            </div>
+          </div>
         </div>
         
         <!-- 翻译输入区 (未提交时显示) -->

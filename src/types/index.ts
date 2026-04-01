@@ -116,6 +116,15 @@ export interface AddWordResult {
   message?: string
 }
 
+export interface WordLookupResult {
+  found: boolean
+  word: string
+  source?: 'library' | 'custom'
+  meanings: WordMeaning[]
+  phonetic?: string
+  message?: string
+}
+
 // ==================== 错题本相关类型 ====================
 
 export interface ErrorBookItem {
