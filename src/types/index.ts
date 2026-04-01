@@ -96,6 +96,26 @@ export interface AIFeedback {
   score: number                    // 评分 0-100
 }
 
+export interface TodaySentenceState {
+  sentence: Sentence | null
+  feedback: AIFeedback | null
+}
+
+export interface CustomWordInput {
+  translation: string
+  phonetic?: string
+  partOfSpeech?: string
+  examples?: string[]
+}
+
+export type AddWordResultStatus = 'added' | 'exists' | 'need_custom_info' | 'error'
+
+export interface AddWordResult {
+  status: AddWordResultStatus
+  word: string
+  message?: string
+}
+
 // ==================== 错题本相关类型 ====================
 
 export interface ErrorBookItem {

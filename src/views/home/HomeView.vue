@@ -18,11 +18,14 @@ onMounted(() => {
 
 const todayPlan = computed(() => learningStore.todayPlan)
 const stats = computed(() => learningStore.stats)
-const progress = computed(() => learningStore.todayProgress)
+const isTodayPlanLoaded = computed(() => learningStore.todayPlanLoaded)
+const progress = computed(() => (isTodayPlanLoaded.value ? learningStore.todayProgress : null))
 
 // 鼓励性文案
 const encouragement = computed(() => {
+  if (!isTodayPlanLoaded.value) return '正在同步今日进度...'
   const rate = progress.value
+  if (rate === null) return '正在同步今日进度...'
   if (rate === 0) return '新的一天，开始学习吧!'
   if (rate < 30) return '加油，你已经迈出第一步!'
   if (rate < 60) return '继续保持，你做得很好!'
@@ -69,7 +72,7 @@ function startLearning() {
           <h2 class="text-xl font-bold">{{ encouragement }}</h2>
         </div>
         <div class="text-right">
-          <p class="text-3xl font-bold">{{ progress }}%</p>
+          <p class="text-3xl font-bold">{{ progress === null ? '--' : `${progress}%` }}</p>
           <p class="text-xs opacity-80">今日进度</p>
         </div>
       </div>
@@ -89,7 +92,7 @@ function startLearning() {
         block
         size="lg"
       >
-        {{ progress > 0 && progress < 100 ? '继续学习' : progress === 100 ? '查看总结' : '开始学习' }}
+        {{ progress !== null && progress > 0 && progress < 100 ? '继续学习' : progress === 100 ? '查看总结' : '开始学习' }}
       </AppButton>
     </section>
     
@@ -120,7 +123,9 @@ function startLearning() {
             <div 
               class="w-10 h-10 rounded-lg flex items-center justify-center"
               :class="[
-                todayPlan?.sentenceCompleted 
+                !isTodayPlanLoaded
+                  ? 'bg-secondary text-muted-foreground'
+                  : todayPlan?.sentenceCompleted 
                   ? 'bg-accent/10 text-accent' 
                   : 'bg-secondary text-muted-foreground'
               ]"
@@ -134,7 +139,7 @@ function startLearning() {
             <div>
               <p class="text-sm font-medium text-foreground">今日长难句</p>
               <p class="text-xs text-muted-foreground">
-                {{ todayPlan?.sentenceCompleted ? '已完成' : '待完成' }}
+                {{ !isTodayPlanLoaded ? '同步中...' : todayPlan?.sentenceCompleted ? '已完成' : '待完成' }}
               </p>
             </div>
           </div>
@@ -142,7 +147,7 @@ function startLearning() {
             :to="{ name: 'SentenceLearning' }"
             class="text-sm text-primary font-medium"
           >
-            {{ todayPlan?.sentenceCompleted ? '查看' : '去练习' }}
+            {{ !isTodayPlanLoaded ? '加载中' : todayPlan?.sentenceCompleted ? '查看' : '去练习' }}
           </RouterLink>
         </div>
       </div>

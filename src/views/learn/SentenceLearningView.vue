@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLearningStore } from '@/stores/learning'
+import type { CustomWordInput } from '@/types'
 import AppButton from '@/components/common/AppButton.vue'
 
 const router = useRouter()
@@ -10,6 +11,14 @@ const learningStore = useLearningStore()
 const userTranslation = ref('')
 const showAnalysis = ref(false)
 const selectedWords = ref<string[]>([])
+const addWordMessage = ref('')
+const pendingWords = ref<string[]>([])
+const showWordModal = ref(false)
+const pendingWord = ref('')
+const customTranslation = ref('')
+const customPhonetic = ref('')
+const customPartOfSpeech = ref('')
+const customExamples = ref('')
 
 const sentence = computed(() => learningStore.todaySentence)
 const feedback = computed(() => learningStore.sentenceAIFeedback)
@@ -30,18 +39,76 @@ function toggleAnalysis() {
 }
 
 function selectWord(word: string) {
-  if (selectedWords.value.includes(word)) {
-    selectedWords.value = selectedWords.value.filter(w => w !== word)
-  } else {
-    selectedWords.value.push(word)
+  if (selectedWords.value[0] === word) {
+    selectedWords.value = []
+    return
   }
+  selectedWords.value = [word]
 }
 
 async function addSelectedWordsToVocabulary() {
-  for (const word of selectedWords.value) {
-    await learningStore.addWordFromSentence(word)
+  if (!sentence.value) return
+  addWordMessage.value = ''
+  pendingWords.value = [...selectedWords.value]
+  while (pendingWords.value.length > 0) {
+    const word = pendingWords.value.shift() as string
+    const result = await learningStore.addWordFromSentence(word, sentence.value.id)
+    if (result.status === 'need_custom_info') {
+      openCustomWordModal(word)
+      return
+    }
+    if (result.status === 'error') {
+      addWordMessage.value = result.message || '添加生词失败'
+      continue
+    }
+    addWordMessage.value = result.status === 'exists' ? `「${word}」已在生词本` : `已添加「${word}」`
   }
   selectedWords.value = []
+}
+
+function openCustomWordModal(word: string) {
+  pendingWord.value = word
+  customTranslation.value = ''
+  customPhonetic.value = ''
+  customPartOfSpeech.value = ''
+  customExamples.value = ''
+  showWordModal.value = true
+}
+
+function closeCustomWordModal() {
+  showWordModal.value = false
+}
+
+async function submitCustomWord() {
+  if (!sentence.value || !pendingWord.value || !customTranslation.value.trim()) return
+  const payload: CustomWordInput = {
+    translation: customTranslation.value.trim(),
+    phonetic: customPhonetic.value.trim() || undefined,
+    partOfSpeech: customPartOfSpeech.value.trim() || undefined,
+    examples: customExamples.value
+      .split('\n')
+      .map((x: string) => x.trim())
+      .filter(Boolean)
+  }
+  const result = await learningStore.addWordFromSentence(pendingWord.value, sentence.value.id, payload)
+  if (result.status === 'error') {
+    addWordMessage.value = result.message || '添加生词失败'
+    return
+  }
+  addWordMessage.value = result.status === 'exists' ? `「${pendingWord.value}」已在生词本` : `已添加「${pendingWord.value}」`
+  showWordModal.value = false
+  const handledWord = pendingWord.value
+  pendingWord.value = ''
+  selectedWords.value = selectedWords.value.filter((w: string) => w !== handledWord)
+
+  while (pendingWords.value.length > 0) {
+    const word = pendingWords.value.shift() as string
+    const nextResult = await learningStore.addWordFromSentence(word, sentence.value.id)
+    if (nextResult.status === 'need_custom_info') {
+      openCustomWordModal(word)
+      return
+    }
+  }
 }
 
 async function addToErrorBook() {
@@ -99,7 +166,7 @@ function splitSentence(text: string) {
                 @click="selectWord(word.replace(/[.,!?;:]/g, ''))"
                 class="cursor-pointer hover:text-primary transition-colors"
                 :class="{
-                  'bg-primary text-primary-foreground px-1 rounded': selectedWords.includes(word.replace(/[.,!?;:]/g, ''))
+                  'bg-sky-100 text-sky-700 px-1 rounded': selectedWords.includes(word.replace(/[.,!?;:]/g, ''))
                 }"
               >
                 {{ word }}{{ ' ' }}
@@ -119,6 +186,9 @@ function splitSentence(text: string) {
             >
               加入生词本
             </button>
+          </p>
+          <p v-if="addWordMessage" class="text-xs mt-2 text-primary">
+            {{ addWordMessage }}
           </p>
         </div>
         
@@ -147,7 +217,7 @@ function splitSentence(text: string) {
         <!-- AI 反馈区 (提交后显示) -->
         <div v-if="feedback" class="space-y-4">
           <!-- 评分 -->
-          <div class="bg-gradient-to-r from-primary/10 to-accent/10 rounded-xl p-4 text-center">
+          <!-- <div class="bg-gradient-to-r from-primary/10 to-accent/10 rounded-xl p-4 text-center">
             <p class="text-sm text-muted-foreground mb-1">翻译得分</p>
             <p class="text-4xl font-bold" :class="[
               feedback.score >= 80 ? 'text-accent' : 
@@ -156,7 +226,7 @@ function splitSentence(text: string) {
             ]">
               {{ feedback.score }}
             </p>
-          </div>
+          </div> -->
           
           <!-- 参考译文 -->
           <div class="bg-card rounded-xl p-4 border border-border">
@@ -165,7 +235,7 @@ function splitSentence(text: string) {
           </div>
           
           <!-- 问题点 -->
-          <div v-if="feedback.issues.length > 0" class="bg-card rounded-xl p-4 border border-border">
+          <!-- <div v-if="feedback.issues.length > 0" class="bg-card rounded-xl p-4 border border-border">
             <p class="text-xs text-muted-foreground mb-2">问题反馈</p>
             <ul class="space-y-2">
               <li 
@@ -181,7 +251,7 @@ function splitSentence(text: string) {
                 {{ issue }}
               </li>
             </ul>
-          </div>
+          </div> -->
           
           <!-- 句子拆解 (可折叠) -->
           <div class="bg-card rounded-xl border border-border overflow-hidden">
@@ -269,6 +339,39 @@ function splitSentence(text: string) {
           <AppButton @click="continueToNewWords">
             继续学习
           </AppButton>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="showWordModal"
+      class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+      @click.self="closeCustomWordModal"
+    >
+      <div class="w-full max-w-sm bg-card rounded-xl border border-border p-4 space-y-3">
+        <h3 class="text-base font-semibold text-foreground">补充单词信息</h3>
+        <p class="text-xs text-muted-foreground">
+          「{{ pendingWord }}」不在公共词库，请先补充翻译（必填）
+        </p>
+        <div class="space-y-2">
+          <label class="text-xs text-muted-foreground">翻译（必填）</label>
+          <input v-model="customTranslation" class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" placeholder="请输入中文释义" />
+        </div>
+        <div class="space-y-2">
+          <label class="text-xs text-muted-foreground">音标（可选）</label>
+          <input v-model="customPhonetic" class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" placeholder="如 /ˈwɜːd/" />
+        </div>
+        <div class="space-y-2">
+          <label class="text-xs text-muted-foreground">词性（可选）</label>
+          <input v-model="customPartOfSpeech" class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" placeholder="如 n. / v." />
+        </div>
+        <div class="space-y-2">
+          <label class="text-xs text-muted-foreground">例句（可选，一行一个）</label>
+          <textarea v-model="customExamples" rows="3" class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm resize-none" />
+        </div>
+        <div class="flex gap-2 pt-1">
+          <AppButton variant="ghost" block @click="closeCustomWordModal">取消</AppButton>
+          <AppButton block :disabled="!customTranslation.trim()" @click="submitCustomWord">保存并加入</AppButton>
         </div>
       </div>
     </div>

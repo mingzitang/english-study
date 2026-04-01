@@ -7,7 +7,10 @@ import type {
   DailyPlan,
   LearningStats,
   WordMastery,
-  AIFeedback
+  AIFeedback,
+  TodaySentenceState,
+  CustomWordInput,
+  AddWordResult
 } from '@/types'
 import { learningApi } from '@/api/learning'
 
@@ -23,6 +26,7 @@ export const useLearningStore = defineStore('learning', () => {
   
   // State - 学习计划
   const todayPlan = ref<DailyPlan | null>(null)
+  const todayPlanLoaded = ref(false)
   const stats = ref<LearningStats | null>(null)
   
   // State - 加载状态
@@ -113,9 +117,12 @@ export const useLearningStore = defineStore('learning', () => {
     loading.value = true
     error.value = null
     try {
-      const sentence = await learningApi.getTodaySentence()
-      todaySentence.value = sentence
-      sentenceAIFeedback.value = null
+      const state: TodaySentenceState = await learningApi.getTodaySentenceState()
+      todaySentence.value = state.sentence
+      sentenceAIFeedback.value = state.feedback
+      if (state.feedback && todayPlan.value) {
+        todayPlan.value.sentenceCompleted = true
+      }
     } catch (e) {
       error.value = e instanceof Error ? e.message : '加载长难句失败'
     } finally {
@@ -152,16 +159,19 @@ export const useLearningStore = defineStore('learning', () => {
     }
   }
 
-  async function addWordFromSentence(word: string) {
+  async function addWordFromSentence(word: string, sentenceId?: string, customInput?: CustomWordInput): Promise<AddWordResult> {
     try {
-      await learningApi.addWordFromSentence(word)
+      return await learningApi.addWordFromSentence(word, sentenceId, customInput)
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '添加生词失败'
+      const message = e instanceof Error ? e.message : '添加生词失败'
+      error.value = message
+      return { status: 'error', word, message }
     }
   }
 
   // Actions - 学习计划和统计
   async function loadTodayPlan() {
+    todayPlanLoaded.value = false
     loading.value = true
     try {
       const plan = await learningApi.getTodayPlan()
@@ -169,6 +179,7 @@ export const useLearningStore = defineStore('learning', () => {
     } catch (e) {
       error.value = e instanceof Error ? e.message : '加载学习计划失败'
     } finally {
+      todayPlanLoaded.value = true
       loading.value = false
     }
   }
@@ -210,6 +221,7 @@ export const useLearningStore = defineStore('learning', () => {
     todaySentence,
     sentenceAIFeedback,
     todayPlan,
+    todayPlanLoaded,
     stats,
     loading,
     error,

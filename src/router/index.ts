@@ -76,6 +76,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, title: '生词本' }
   },
   {
+    path: '/vocabulary/:id',
+    name: 'VocabularyDetail',
+    component: () => import('@/views/vocabulary/VocabularyDetailView.vue'),
+    meta: { requiresAuth: true, title: '单词详情' }
+  },
+  {
     path: '/errors',
     name: 'ErrorBook',
     component: () => import('@/views/errors/ErrorBookView.vue'),

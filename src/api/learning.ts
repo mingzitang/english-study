@@ -7,7 +7,10 @@ import type {
   WordMastery,
   AIFeedback,
   ErrorBookItem,
-  VocabularyBookItem
+  VocabularyBookItem,
+  TodaySentenceState,
+  CustomWordInput,
+  AddWordResult
 } from '@/types'
 import { getSupabase } from '@/lib/supabase'
 
@@ -31,6 +34,30 @@ type SentenceRow = {
   created_at: string
 }
 
+type PrivateVocabularyRow = {
+  id: string
+  user_id: string
+  word_id?: string | null
+  source: VocabularyBookItem['source']
+  source_id?: string | null
+  mastery: WordMastery
+  added_at: string
+  words?: WordRow | WordRow[] | null
+  custom_word?: string | null
+}
+
+type UserCustomWordRow = {
+  id: string
+  user_id: string
+  word: string
+  phonetic: string | null
+  meanings: unknown
+  examples: unknown
+  exam_type: 'english1' | 'english2' | 'both'
+  created_at: string
+  updated_at: string
+}
+
 async function getCurrentUserId(): Promise<string> {
   const {
     data: { user },
@@ -52,7 +79,7 @@ async function getExamType(userId: string): Promise<'english1' | 'english2'> {
 }
 
 function mapWordRow(row: WordRow, source: Word['source'] = 'library', sourceId?: string): Word {
-  const meanings = Array.isArray(row.meanings) ? (row.meanings as Word['meanings']) : []
+  const meanings = normalizeMeanings(row.meanings)
   const examples = Array.isArray(row.examples) ? (row.examples as string[]) : []
 
   return {
@@ -65,6 +92,25 @@ function mapWordRow(row: WordRow, source: Word['source'] = 'library', sourceId?:
     sourceId,
     createdAt: row.created_at
   }
+}
+
+function normalizeMeanings(raw: unknown): Word['meanings'] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((item: unknown) => {
+      if (!item || typeof item !== 'object') return null
+      const obj = item as Record<string, unknown>
+      const partOfSpeech =
+        (typeof obj.partOfSpeech === 'string' ? obj.partOfSpeech : null) ||
+        (typeof obj.pos === 'string' ? obj.pos : null) ||
+        'other'
+      const definition =
+        (typeof obj.definition === 'string' ? obj.definition : null) ||
+        (typeof obj.meaning === 'string' ? obj.meaning : null)
+      if (!definition) return null
+      return { partOfSpeech, definition }
+    })
+    .filter((x): x is Word['meanings'][number] => x !== null)
 }
 
 function mapSentenceRow(row: SentenceRow): Sentence {
@@ -89,6 +135,27 @@ function getTodayBounds() {
     date: start.toISOString().slice(0, 10),
     startISO: start.toISOString(),
     endISO: end.toISOString()
+  }
+}
+
+function toAIFeedback(raw: unknown): AIFeedback | null {
+  if (!raw || typeof raw !== 'object') return null
+  const maybe = raw as Partial<AIFeedback>
+  if (
+    typeof maybe.referenceTranslation !== 'string' ||
+    !Array.isArray(maybe.issues) ||
+    typeof maybe.structureAnalysis !== 'string' ||
+    typeof maybe.shouldAddToErrorBook !== 'boolean' ||
+    typeof maybe.score !== 'number'
+  ) {
+    return null
+  }
+  return {
+    referenceTranslation: maybe.referenceTranslation,
+    issues: maybe.issues.filter((x): x is string => typeof x === 'string'),
+    structureAnalysis: maybe.structureAnalysis,
+    shouldAddToErrorBook: maybe.shouldAddToErrorBook,
+    score: maybe.score
   }
 }
 
@@ -169,46 +236,150 @@ export const learningApi = {
     if (error) throw new Error(error.message)
   },
 
-  async addWordFromSentence(word: string, sentenceId?: string): Promise<Word> {
+  async addWordFromSentence(word: string, sentenceId?: string, customInput?: CustomWordInput): Promise<AddWordResult> {
     const userId = await getCurrentUserId()
     const examType = await getExamType(userId)
+    const normalizedWord = word.trim().toLowerCase()
+    const supabase = getSupabase()
+    const source = sentenceId ? 'sentence' : 'manual'
 
-    const { data: inserted, error } = await getSupabase()
+    const { data: existedCustomWords, error: existedCustomError } = await supabase
+      .from('user_custom_words')
+      .select('id,user_id,word,phonetic,meanings,examples,exam_type,created_at,updated_at')
+      .eq('user_id', userId)
+      .ilike('word', normalizedWord)
+      .limit(1)
+    if (existedCustomError) throw new Error(existedCustomError.message)
+    const customWord = existedCustomWords && existedCustomWords.length > 0 ? (existedCustomWords[0] as UserCustomWordRow) : null
+
+    // 受 RLS 限制，前端不直接插入 words，优先复用词库中已有单词
+    const { data: existedWords, error: existedError } = await supabase
       .from('words')
-      .insert({ word: word.trim(), phonetic: null, meanings: [], examples: [], exam_type: examType })
       .select('id,word,phonetic,meanings,examples,created_at')
-      .single()
+      .in('exam_type', [examType, 'both'])
+      .ilike('word', normalizedWord)
+      .limit(1)
+    if (existedError) throw new Error(existedError.message)
 
-    if (error || !inserted) throw new Error(error?.message || 'Failed to add vocabulary')
-    const newWord = inserted as WordRow
+    const libraryWord = existedWords && existedWords.length > 0 ? (existedWords[0] as WordRow) : null
 
-    await getSupabase().from('user_word_progress').upsert(
-      {
+    if (!libraryWord && !customWord) {
+      if (!customInput?.translation?.trim()) {
+        return {
+          status: 'need_custom_info',
+          word: normalizedWord,
+          message: '请输入该单词的翻译后再加入生词本'
+        }
+      }
+      const meanings = [{ partOfSpeech: customInput.partOfSpeech?.trim() || 'n.', definition: customInput.translation.trim() }]
+      const examples = (customInput.examples || []).map(x => x.trim()).filter(Boolean)
+      const { data: insertedCustom, error: insertCustomError } = await supabase
+        .from('user_custom_words')
+        .insert({
+          user_id: userId,
+          word: normalizedWord,
+          phonetic: customInput.phonetic?.trim() || null,
+          meanings,
+          examples,
+          exam_type: examType
+        })
+        .select('id,user_id,word,phonetic,meanings,examples,exam_type,created_at,updated_at')
+        .single()
+      if (insertCustomError && insertCustomError.code !== '23505') throw new Error(insertCustomError.message)
+
+      const resolvedCustom = (insertedCustom as UserCustomWordRow | null) || (() => null)()
+      let customId = resolvedCustom?.id
+      if (!customId) {
+        const { data: existedInsertedCustom, error: existedInsertedError } = await supabase
+          .from('user_custom_words')
+          .select('id,user_id,word,phonetic,meanings,examples,exam_type,created_at,updated_at')
+          .eq('user_id', userId)
+          .ilike('word', normalizedWord)
+          .limit(1)
+          .maybeSingle()
+        if (existedInsertedError || !existedInsertedCustom) throw new Error(existedInsertedError?.message || '添加私有词失败')
+        customId = (existedInsertedCustom as UserCustomWordRow).id
+      }
+
+      const { data: existedVocabByCustom } = await supabase
+        .from('vocabulary_book')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('source', 'manual')
+        .eq('source_id', customId)
+        .limit(1)
+      if (existedVocabByCustom && existedVocabByCustom.length > 0) {
+        return { status: 'exists', word: normalizedWord, message: '该单词已在生词本中' }
+      }
+
+      const { error: insertVocabCustomError } = await supabase.from('vocabulary_book').insert({
         user_id: userId,
-        word_id: newWord.id,
-        mastery: 'unknown',
-        review_count: 0,
-        is_new: true,
-        source: sentenceId ? 'sentence' : 'manual',
-        source_id: sentenceId ?? null,
-        updated_at: new Date().toISOString()
-      },
-      { onConflict: 'user_id,word_id' }
-    )
+        word_id: null,
+        source: 'manual',
+        source_id: customId,
+        mastery: 'unknown'
+      })
+      if (insertVocabCustomError && insertVocabCustomError.code !== '23505') throw new Error(insertVocabCustomError.message)
 
-    const { error: vocabError } = await getSupabase().from('vocabulary_book').upsert(
-      {
+      return { status: 'added', word: normalizedWord, message: '已添加到生词本' }
+    }
+
+    if (libraryWord) {
+      const { data: existedVocabByWord } = await supabase
+        .from('vocabulary_book')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('word_id', libraryWord.id)
+        .limit(1)
+      if (existedVocabByWord && existedVocabByWord.length > 0) {
+        return { status: 'exists', word: normalizedWord, message: '该单词已在生词本中' }
+      }
+
+      await supabase.from('user_word_progress').upsert(
+        {
+          user_id: userId,
+          word_id: libraryWord.id,
+          mastery: 'unknown',
+          review_count: 0,
+          is_new: true,
+          source,
+          source_id: sentenceId ?? null,
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'user_id,word_id' }
+      )
+
+      const { error: vocabError } = await supabase.from('vocabulary_book').insert({
         user_id: userId,
-        word_id: newWord.id,
-        source: sentenceId ? 'sentence' : 'manual',
+        word_id: libraryWord.id,
+        source,
         source_id: sentenceId ?? null,
         mastery: 'unknown'
-      },
-      { onConflict: 'user_id,word_id' }
-    )
-    if (vocabError) throw new Error(vocabError.message)
+      })
+      if (vocabError && vocabError.code !== '23505') throw new Error(vocabError.message)
+      return { status: 'added', word: normalizedWord, message: '已添加到生词本' }
+    }
 
-    return mapWordRow(newWord, sentenceId ? 'sentence' : 'manual', sentenceId)
+    // 在私有词库存在但公共词库不存在：按私有词加入生词本
+    const { data: existedVocabByCustom } = await supabase
+      .from('vocabulary_book')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('source', 'manual')
+      .eq('source_id', customWord!.id)
+      .limit(1)
+    if (existedVocabByCustom && existedVocabByCustom.length > 0) {
+      return { status: 'exists', word: normalizedWord, message: '该单词已在生词本中' }
+    }
+    const { error: insertVocabCustomError } = await supabase.from('vocabulary_book').insert({
+      user_id: userId,
+      word_id: null,
+      source: 'manual',
+      source_id: customWord!.id,
+      mastery: 'unknown'
+    })
+    if (insertVocabCustomError && insertVocabCustomError.code !== '23505') throw new Error(insertVocabCustomError.message)
+    return { status: 'added', word: normalizedWord, message: '已添加到生词本' }
   },
 
   async getTodaySentence(): Promise<Sentence> {
@@ -225,6 +396,49 @@ export const learningApi = {
     if (!data || data.length === 0) throw new Error('No sentence available')
 
     return mapSentenceRow(data[0] as SentenceRow)
+  },
+
+  async getTodaySentenceState(): Promise<TodaySentenceState> {
+    const userId = await getCurrentUserId()
+    const supabase = getSupabase()
+    const { date, startISO, endISO } = getTodayBounds()
+
+    const { data: progressByDate } = await supabase
+      .from('user_sentence_progress')
+      .select('sentence_id,ai_feedback')
+      .eq('user_id', userId)
+      .eq('last_attempt_date', date)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+
+    const { data: progressByUpdatedAt } = await supabase
+      .from('user_sentence_progress')
+      .select('sentence_id,ai_feedback')
+      .eq('user_id', userId)
+      .gte('updated_at', startISO)
+      .lt('updated_at', endISO)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+
+    const progress = (progressByDate && progressByDate[0]) || (progressByUpdatedAt && progressByUpdatedAt[0]) || null
+    if (progress?.sentence_id) {
+      const { data: sentenceData, error } = await supabase
+        .from('sentences')
+        .select('id,content,translation,analysis,source,difficulty,exam_type,created_at')
+        .eq('id', progress.sentence_id)
+        .single()
+      if (!error && sentenceData) {
+        return {
+          sentence: mapSentenceRow(sentenceData as SentenceRow),
+          feedback: toAIFeedback(progress.ai_feedback)
+        }
+      }
+    }
+
+    return {
+      sentence: await this.getTodaySentence(),
+      feedback: null
+    }
   },
 
   async submitSentenceTranslation(sentenceId: string, translation: string): Promise<AIFeedback> {
@@ -330,7 +544,14 @@ export const learningApi = {
       .gte('updated_at', startISO)
       .lt('updated_at', endISO)
 
-    const { data: todaySentence } = await supabase
+    const { data: todaySentenceByDate } = await supabase
+      .from('user_sentence_progress')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('last_attempt_date', date)
+      .limit(1)
+
+    const { data: todaySentenceByUpdatedAt } = await supabase
       .from('user_sentence_progress')
       .select('id')
       .eq('user_id', userId)
@@ -347,7 +568,10 @@ export const learningApi = {
       reviewWordsTarget: settings?.daily_review_words ?? 60,
       newWordsCompleted,
       reviewWordsCompleted,
-      sentenceCompleted: Boolean(todaySentence && todaySentence.length > 0),
+      sentenceCompleted: Boolean(
+        (todaySentenceByDate && todaySentenceByDate.length > 0) ||
+        (todaySentenceByUpdatedAt && todaySentenceByUpdatedAt.length > 0)
+      ),
       estimatedMinutes: 30
     }
   },
@@ -468,13 +692,7 @@ export const learningApi = {
     const { data, error } = await getSupabase()
       .from('vocabulary_book')
       .select(`
-        id,
-        user_id,
-        word_id,
-        source,
-        source_id,
-        mastery,
-        added_at,
+        *,
         words (
           id,word,phonetic,meanings,examples,created_at
         )
@@ -484,25 +702,51 @@ export const learningApi = {
 
     if (error) throw new Error(error.message)
 
-    const rows = (data ?? []) as Array<{
-      id: string
-      user_id: string
-      word_id: string
-      source: VocabularyBookItem['source']
-      source_id?: string
-      mastery: WordMastery
-      added_at: string
-      words: WordRow | WordRow[] | null
-    }>
+    const rows = (data ?? []) as PrivateVocabularyRow[]
+    const customIds = rows
+      .filter(row => !row.word_id && row.source === 'manual' && typeof row.source_id === 'string')
+      .map(row => row.source_id as string)
+    const customWordMap = new Map<string, UserCustomWordRow>()
+    if (customIds.length > 0) {
+      const { data: customWords, error: customWordsError } = await getSupabase()
+        .from('user_custom_words')
+        .select('id,user_id,word,phonetic,meanings,examples,exam_type,created_at,updated_at')
+        .eq('user_id', userId)
+        .in('id', customIds)
+      if (customWordsError) throw new Error(customWordsError.message)
+      for (const custom of customWords ?? []) {
+        const row = custom as UserCustomWordRow
+        customWordMap.set(row.id, row)
+      }
+    }
 
     const items: VocabularyBookItem[] = []
     for (const row of rows) {
       const word = Array.isArray(row.words) ? row.words[0] : row.words
-      if (!word) continue
+      const customWord = row.source_id ? customWordMap.get(row.source_id) : undefined
+      const fallbackWordText = customWord?.word || row.custom_word
+      if (!word && !fallbackWordText) continue
+      const fallbackMeanings: Word['meanings'] = word
+        ? normalizeMeanings(word.meanings)
+        : normalizeMeanings(customWord?.meanings)
+      const fallbackExamples: string[] = word
+        ? (Array.isArray(word.examples) ? (word.examples as string[]) : [])
+        : (Array.isArray(customWord?.examples) ? (customWord?.examples as string[]) : [])
       const item: VocabularyBookItem = {
         id: row.id,
-        wordId: row.word_id,
-        word: mapWordRow(word, row.source, row.source_id),
+        wordId: row.word_id ?? '',
+        word: word
+          ? mapWordRow(word, row.source, row.source_id ?? undefined)
+          : {
+              id: row.word_id || `private-${row.id}`,
+              word: fallbackWordText!,
+              phonetic: customWord?.phonetic || undefined,
+              meanings: fallbackMeanings,
+              examples: fallbackExamples,
+              source: row.source,
+              sourceId: row.source_id ?? undefined,
+              createdAt: row.added_at
+            },
         userId: row.user_id,
         addedAt: row.added_at,
         source: row.source,
@@ -513,6 +757,11 @@ export const learningApi = {
     }
 
     return items
+  },
+
+  async getVocabularyItemById(itemId: string): Promise<VocabularyBookItem | null> {
+    const items = await this.getVocabularyItems()
+    return items.find(item => item.id === itemId) || null
   },
 
   async getCheckInRecords(limit = 31): Promise<CheckInRecord[]> {
@@ -563,7 +812,14 @@ export const learningApi = {
       .gte('updated_at', startISO)
       .lt('updated_at', endISO)
 
-    const { data: todaySentence } = await supabase
+    const { data: todaySentenceByDate } = await supabase
+      .from('user_sentence_progress')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('last_attempt_date', date)
+      .limit(1)
+
+    const { data: todaySentenceByUpdatedAt } = await supabase
       .from('user_sentence_progress')
       .select('id')
       .eq('user_id', userId)
@@ -586,7 +842,10 @@ export const learningApi = {
 
     const newWordsCompleted = (todayWords ?? []).filter((x: { is_new: boolean }) => x.is_new === false).length
     const reviewWordsCompleted = Math.max(0, (todayWords ?? []).length - newWordsCompleted)
-    const sentenceCompleted = Boolean(todaySentence && todaySentence.length > 0)
+    const sentenceCompleted = Boolean(
+      (todaySentenceByDate && todaySentenceByDate.length > 0) ||
+      (todaySentenceByUpdatedAt && todaySentenceByUpdatedAt.length > 0)
+    )
 
     const newTarget = settings?.daily_new_words ?? 40
     const reviewTarget = settings?.daily_review_words ?? 60
