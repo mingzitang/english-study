@@ -1,12 +1,23 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { mockCheckInRecords, mockStats } from '@/mock/data'
+import type { CheckInRecord, LearningStats } from '@/types'
+import { learningApi } from '@/api/learning'
 
 const router = useRouter()
 
-const stats = ref(mockStats)
-const records = ref(mockCheckInRecords)
+const stats = ref<LearningStats>({
+  totalWordsLearned: 0,
+  totalSentencesCompleted: 0,
+  consecutiveDays: 0,
+  totalDays: 0,
+  todayNewWords: 0,
+  todayReviewWords: 0,
+  todaySentences: 0,
+  weeklyTrend: []
+})
+const records = ref<CheckInRecord[]>([])
+const loading = ref(false)
 
 // 生成日历数据 (当前月)
 const calendarDays = computed(() => {
@@ -30,7 +41,7 @@ const calendarDays = computed(() => {
   // 填充日期
   for (let day = 1; day <= lastDay.getDate(); day++) {
     const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-    const isCheckedIn = records.value.some(r => r.date === dateStr)
+    const isCheckedIn = records.value.some((r: CheckInRecord) => r.date === dateStr)
     const isToday = day === today.getDate()
     days.push({ day, isCheckedIn, isToday, date: dateStr })
   }
@@ -48,6 +59,20 @@ const weekDays = ['日', '一', '二', '三', '四', '五', '六']
 function goBack() {
   router.back()
 }
+
+onMounted(async () => {
+  loading.value = true
+  try {
+    const [statsData, recordsData] = await Promise.all([
+      learningApi.getStats(),
+      learningApi.getCheckInRecords(60)
+    ])
+    stats.value = statsData
+    records.value = recordsData
+  } finally {
+    loading.value = false
+  }
+})
 </script>
 
 <template>
@@ -147,7 +172,8 @@ function goBack() {
     <!-- 打卡记录列表 -->
     <div class="px-4 pb-6">
       <h3 class="text-base font-semibold text-foreground mb-3">最近打卡</h3>
-      <div class="space-y-3">
+      <div v-if="loading" class="text-sm text-muted-foreground py-2">加载中...</div>
+      <div v-else class="space-y-3">
         <div
           v-for="record in records"
           :key="record.id"

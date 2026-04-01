@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { mockSentences } from '@/mock/data'
+import type { ErrorBookItem } from '@/types'
+import { learningApi } from '@/api/learning'
 import FilterBar from '@/components/common/FilterBar.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 
@@ -16,15 +17,8 @@ const filterOptions = [
   { value: 'mastered', label: '已掌握' }
 ]
 
-// Mock 错题本数据
-const errorItems = ref(mockSentences.map((sentence, index) => ({
-  id: `error_${sentence.id}`,
-  sentence,
-  addedAt: new Date(Date.now() - index * 86400000 * 2).toISOString(),
-  addedReason: (['auto', 'ai_suggest', 'manual'] as const)[index % 3],
-  reviewStatus: (['pending', 'reviewed', 'mastered'] as const)[index % 3],
-  reviewCount: index
-})))
+const errorItems = ref<ErrorBookItem[]>([])
+const loading = ref(false)
 
 // 筛选后的列表
 const filteredItems = computed(() => {
@@ -78,6 +72,15 @@ function formatDate(dateStr: string) {
 function goBack() {
   router.back()
 }
+
+onMounted(async () => {
+  loading.value = true
+  try {
+    errorItems.value = await learningApi.getErrorBookItems()
+  } finally {
+    loading.value = false
+  }
+})
 </script>
 
 <template>
@@ -113,7 +116,8 @@ function goBack() {
     </div>
     
     <!-- 错题列表 -->
-    <div v-if="filteredItems.length > 0" class="divide-y divide-border">
+    <div v-if="loading" class="p-6 text-sm text-muted-foreground text-center">加载中...</div>
+    <div v-else-if="filteredItems.length > 0" class="divide-y divide-border">
       <div
         v-for="item in filteredItems"
         :key="item.id"

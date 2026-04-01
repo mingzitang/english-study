@@ -119,13 +119,6 @@ async function handleSubmit() {
           注册新账号
         </AppButton>
       </RouterLink>
-      
-      <!-- 测试账号提示 -->
-      <div class="mt-8 p-4 bg-secondary/50 rounded-xl">
-        <p class="text-xs text-muted-foreground text-center">
-          测试账号: test@example.com / 123456
-        </p>
-      </div>
     </div>
     
     <!-- 底部 -->

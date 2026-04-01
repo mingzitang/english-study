@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import type { WordMastery } from '@/types'
-import { mockWords } from '@/mock/data'
+import type { WordMastery, VocabularyBookItem } from '@/types'
+import { learningApi } from '@/api/learning'
 import FilterBar from '@/components/common/FilterBar.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 
@@ -17,12 +17,13 @@ const filterOptions = [
   { value: 'known', label: '认识' }
 ]
 
-// Mock 生词本数据
-const vocabularyItems = ref(mockWords.slice(0, 6).map((word, index) => ({
-  ...word,
-  mastery: (['unknown', 'fuzzy', 'known'] as WordMastery[])[index % 3],
-  addedAt: new Date(Date.now() - index * 86400000).toISOString()
-})))
+type VocabularyViewItem = VocabularyBookItem['word'] & {
+  mastery: WordMastery
+  addedAt: string
+}
+
+const vocabularyItems = ref<VocabularyViewItem[]>([])
+const loading = ref(false)
 
 // 筛选后的列表
 const filteredItems = computed(() => {
@@ -61,6 +62,20 @@ function formatDate(dateStr: string) {
 function goBack() {
   router.back()
 }
+
+onMounted(async () => {
+  loading.value = true
+  try {
+    const list = await learningApi.getVocabularyItems()
+    vocabularyItems.value = list.map(item => ({
+      ...item.word,
+      mastery: item.mastery,
+      addedAt: item.addedAt
+    }))
+  } finally {
+    loading.value = false
+  }
+})
 </script>
 
 <template>
@@ -96,7 +111,8 @@ function goBack() {
     </div>
     
     <!-- 单词列表 -->
-    <div v-if="filteredItems.length > 0" class="divide-y divide-border">
+    <div v-if="loading" class="p-6 text-sm text-muted-foreground text-center">加载中...</div>
+    <div v-else-if="filteredItems.length > 0" class="divide-y divide-border">
       <div
         v-for="item in filteredItems"
         :key="item.id"
