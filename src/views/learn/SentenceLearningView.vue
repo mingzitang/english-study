@@ -1,13 +1,26 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLearningStore } from '@/stores/learning'
 import type { CustomWordInput } from '@/types'
 import { learningApi } from '@/api/learning'
 import AppButton from '@/components/common/AppButton.vue'
 
+/** 本地浅红划分（不落库） */
+type HighlightRange = { id: string; start: number; end: number }
+/** 顶部批注卡片（不落库） */
+type LocalAnnotation = { id: string; words: string[]; text: string }
+
+type SentencePiece = { kind: 'hl'; text: string } | { kind: 'word'; text: string } | { kind: 'space'; text: string }
+
 const router = useRouter()
 const learningStore = useLearningStore()
+
+const sentenceInteractRef = ref<HTMLElement | null>(null)
+const constituentMode = ref(false)
+const highlights = ref<HighlightRange[]>([])
+const annotations = ref<LocalAnnotation[]>([])
+const noteWordsBuffer = ref<string[]>([])
 
 const userTranslation = ref('')
 const showAnalysis = ref(false)
@@ -44,8 +57,140 @@ async function loadSentence() {
   }
 }
 
+function randomId() {
+  return typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`
+}
+
+function mergedHighlightSpans(ranges: HighlightRange[]): { start: number; end: number }[] {
+  const sorted = [...ranges].map(r => ({ start: r.start, end: r.end })).sort((a, b) => a.start - b.start)
+  const out: { start: number; end: number }[] = []
+  for (const r of sorted) {
+    if (r.end <= r.start) continue
+    if (out.length === 0) {
+      out.push({ start: r.start, end: r.end })
+      continue
+    }
+    const last = out[out.length - 1]
+    if (r.start <= last.end) last.end = Math.max(last.end, r.end)
+    else out.push({ start: r.start, end: r.end })
+  }
+  return out
+}
+
+function segmentsFromMerged(
+  full: string,
+  merged: { start: number; end: number }[]
+): { text: string; highlighted: boolean }[] {
+  if (!full) return []
+  if (merged.length === 0) return [{ text: full, highlighted: false }]
+  const out: { text: string; highlighted: boolean }[] = []
+  let pos = 0
+  for (const m of merged) {
+    const s = Math.max(0, Math.min(m.start, full.length))
+    const e = Math.max(s, Math.min(m.end, full.length))
+    if (s > pos) out.push({ text: full.slice(pos, s), highlighted: false })
+    if (e > s) out.push({ text: full.slice(s, e), highlighted: true })
+    pos = e
+  }
+  if (pos < full.length) out.push({ text: full.slice(pos), highlighted: false })
+  return out
+}
+
+function getSelectionOffsets(container: HTMLElement): { start: number; end: number } | null {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null
+  const range = sel.getRangeAt(0)
+  if (!container.contains(range.commonAncestorContainer)) return null
+  const pre = range.cloneRange()
+  pre.selectNodeContents(container)
+  pre.setEnd(range.startContainer, range.startOffset)
+  const start = pre.toString().length
+  const end = start + range.toString().length
+  return { start, end }
+}
+
+function onConstituentMouseUp() {
+  if (!constituentMode.value || !sentence.value) return
+  const el = sentenceInteractRef.value
+  if (!el) return
+  const o = getSelectionOffsets(el)
+  if (!o || o.start === o.end) return
+  const n = sentence.value.content.length
+  const start = Math.max(0, Math.min(o.start, n))
+  const end = Math.max(start, Math.min(o.end, n))
+  if (end <= start) return
+  highlights.value.push({ id: randomId(), start, end })
+  selRemove()
+}
+
+function selRemove() {
+  const sel = window.getSelection()
+  sel?.removeAllRanges()
+}
+
+function clearHighlights() {
+  highlights.value = []
+  selRemove()
+}
+
+const segmentPieces = computed(() => {
+  const full = sentence.value?.content ?? ''
+  return segmentsFromMerged(full, mergedHighlightSpans(highlights.value))
+})
+
+const interactivePieces = computed((): SentencePiece[] => {
+  const full = sentence.value?.content ?? ''
+  if (!full) return []
+  const segs = segmentPieces.value
+  const out: SentencePiece[] = []
+  for (const s of segs) {
+    if (s.highlighted) {
+      if (s.text) out.push({ kind: 'hl', text: s.text })
+      continue
+    }
+    const parts = s.text.split(/(\s+)/)
+    for (const part of parts) {
+      if (!part) continue
+      if (/^\s+$/.test(part)) out.push({ kind: 'space', text: part })
+      else out.push({ kind: 'word', text: part })
+    }
+  }
+  return out
+})
+
+function cleanToken(raw: string) {
+  return raw.replace(/[.,!?;:]/g, '').trim().toLowerCase()
+}
+
+function wordPieceClass(raw: string) {
+  const clean = cleanToken(raw)
+  return {
+    'bg-sky-100 text-sky-700 px-1 rounded': clean && selectedWords.value.includes(clean),
+    'ring-1 ring-primary/50 rounded px-0.5': clean && noteWordsBuffer.value.includes(clean)
+  }
+}
+
+function resetLocalAnnotationState() {
+  highlights.value = []
+  annotations.value = []
+  noteWordsBuffer.value = []
+  constituentMode.value = false
+  selRemove()
+}
+
+watch(
+  () => sentence.value?.id,
+  () => {
+    resetLocalAnnotationState()
+  }
+)
+
 onMounted(() => {
   loadSentence()
+})
+
+onBeforeUnmount(() => {
+  resetLocalAnnotationState()
 })
 
 async function submitTranslation() {
@@ -66,9 +211,36 @@ function selectWord(word: string) {
   selectedWords.value = [word]
 }
 
-async function handleWordClick(word: string) {
+function toggleNoteWord(clean: string) {
+  const i = noteWordsBuffer.value.indexOf(clean)
+  if (i >= 0) noteWordsBuffer.value.splice(i, 1)
+  else noteWordsBuffer.value.push(clean)
+}
+
+function addAnnotationCard() {
+  const words = [...noteWordsBuffer.value]
+  if (words.length === 0) return
+  annotations.value.push({
+    id: randomId(),
+    words,
+    text: ''
+  })
+  noteWordsBuffer.value = []
+}
+
+function removeAnnotation(id: string) {
+  annotations.value = annotations.value.filter((a: LocalAnnotation) => a.id !== id)
+}
+
+async function handleWordClick(word: string, e?: MouseEvent) {
   const cleanWord = word.replace(/[.,!?;:]/g, '').trim().toLowerCase()
   if (!cleanWord) return
+  if (constituentMode.value) return
+  if (e && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault()
+    toggleNoteWord(cleanWord)
+    return
+  }
   selectWord(cleanWord)
   lookupVisible.value = true
   lookupLoading.value = true
@@ -169,10 +341,6 @@ function goToSummary() {
   router.push({ name: 'DailySummary' })
 }
 
-// 将句子拆分为单词，用于点击选择
-function splitSentence(text: string) {
-  return text.split(/\s+/).filter(word => word.length > 0)
-}
 </script>
 
 <template>
@@ -189,6 +357,72 @@ function splitSentence(text: string) {
       
       <!-- 句子内容 -->
       <div v-else-if="sentence" class="p-4 space-y-4">
+        <!-- 本地批注（纯前端，离开页面即清空） -->
+        <div
+          v-if="annotations.length > 0"
+          class="sticky top-0 z-20 -mx-1 border-b border-border bg-background/95 backdrop-blur-sm py-3 px-1 space-y-2 mb-1"
+        >
+          <p class="text-xs font-medium text-muted-foreground">批注（仅本页有效）</p>
+          <div
+            v-for="a in annotations"
+            :key="a.id"
+            class="rounded-lg border border-border bg-card p-3 shadow-sm"
+          >
+            <div class="flex justify-between gap-2 mb-2">
+              <span class="text-xs font-medium text-foreground truncate" :title="a.words.join(' ')">{{
+                a.words.join(' · ')
+              }}</span>
+              <button
+                type="button"
+                class="text-xs text-muted-foreground hover:text-destructive shrink-0"
+                @click="removeAnnotation(a.id)"
+              >
+                删除
+              </button>
+            </div>
+            <textarea
+              v-model="a.text"
+              rows="2"
+              class="w-full text-sm rounded-md border border-border bg-background px-2 py-1.5 text-foreground placeholder:text-muted-foreground resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder="输入备注…"
+            />
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
+            :class="constituentMode ? 'border-primary text-primary bg-primary/5' : ''"
+            @click="constituentMode = !constituentMode"
+          >
+            {{ constituentMode ? '退出划成分' : '划成分' }}
+          </button>
+          <button
+            v-if="constituentMode"
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary"
+            @click="clearHighlights"
+          >
+            清除划分
+          </button>
+          <button
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10 disabled:opacity-40 disabled:pointer-events-none"
+            :disabled="noteWordsBuffer.length === 0"
+            @click="addAnnotationCard"
+          >
+            添加批注
+          </button>
+        </div>
+        <p v-if="constituentMode" class="text-xs text-muted-foreground -mt-2">
+          在句子上拖拽选中英文，松开后标成浅红；此模式下不可点词查义。
+        </p>
+        <p v-else class="text-xs text-muted-foreground -mt-2">
+          点词查义、加入生词本；按住 <kbd class="px-1 rounded bg-secondary text-[10px]">Ctrl</kbd> /
+          <kbd class="px-1 rounded bg-secondary text-[10px]">⌘</kbd> 点词可多选，再点「添加批注」。触屏上若划选不便，可仅用键盘多选。
+        </p>
+
         <!-- 难度和来源 -->
         <div class="flex items-center gap-2 text-xs">
           <span class="px-2 py-1 bg-primary/10 text-primary rounded-full">
@@ -202,23 +436,40 @@ function splitSentence(text: string) {
         <!-- 英文句子 -->
         <div class="bg-card rounded-xl p-4 border border-border">
           <p class="text-xs text-muted-foreground mb-2">英文原句</p>
-          <p class="text-foreground leading-relaxed text-lg">
-            <!-- 可点击选择的单词 -->
-            <template v-if="feedback">
-              <span
-                v-for="(word, index) in splitSentence(sentence.content)"
-                :key="index"
-                @click="handleWordClick(word)"
-                class="cursor-pointer hover:text-primary transition-colors"
-                :class="{
-                  'bg-sky-100 text-sky-700 px-1 rounded': selectedWords.includes(word.replace(/[.,!?;:]/g, ''))
-                }"
-              >
-                {{ word }}{{ ' ' }}
-              </span>
+          <p
+            ref="sentenceInteractRef"
+            class="text-foreground leading-relaxed text-lg"
+            :class="constituentMode ? 'select-text cursor-text' : ''"
+            @mouseup="onConstituentMouseUp"
+          >
+            <template v-if="feedback && !constituentMode">
+              <template v-for="(p, index) in interactivePieces" :key="index">
+                <span v-if="p.kind === 'space'" class="whitespace-pre select-none">{{ p.text }}</span>
+                <span
+                  v-else-if="p.kind === 'hl'"
+                  class="bg-red-100/90 dark:bg-red-950/40 text-foreground rounded px-0.5"
+                  >{{ p.text }}</span
+                >
+                <span
+                  v-else
+                  class="cursor-pointer hover:text-primary transition-colors"
+                  :class="wordPieceClass(p.text)"
+                  @click="handleWordClick(p.text, $event)"
+                  >{{ p.text }}</span
+                >
+              </template>
             </template>
             <template v-else>
-              {{ sentence.content }}
+              <span
+                v-for="(seg, si) in segmentPieces"
+                :key="si"
+                :class="
+                  seg.highlighted
+                    ? 'bg-red-100/90 dark:bg-red-950/40 text-foreground rounded px-0.5'
+                    : ''
+                "
+                >{{ seg.text }}</span
+              >
             </template>
           </p>
           
