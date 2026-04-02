@@ -378,6 +378,68 @@ function pieceOverlapsCharRange(p: SentencePiece, lo: number, hi: number) {
   return p.start < hi && p.end > lo
 }
 
+function neighborWordPieces(pi: number): [SentencePiece & { kind: 'word' } | null, SentencePiece & { kind: 'word' } | null] {
+  const arr = interactivePieces.value
+  let prev: (SentencePiece & { kind: 'word' }) | null = null
+  for (let i = pi - 1; i >= 0; i--) {
+    const x = arr[i]
+    if (x.kind === 'word') {
+      prev = x
+      break
+    }
+  }
+  let next: (SentencePiece & { kind: 'word' }) | null = null
+  for (let i = pi + 1; i < arr.length; i++) {
+    const x = arr[i]
+    if (x.kind === 'word') {
+      next = x
+      break
+    }
+  }
+  return [prev, next]
+}
+
+function wordsShareSavedAnnotation(
+  a: SentencePiece & { kind: 'word' },
+  b: SentencePiece & { kind: 'word' }
+) {
+  return annotations.value.some((ann: LocalAnnotation) => {
+    const hasA = ann.spans.some((s: CharSpan) => spansEqual(s, { start: a.start, end: a.end }))
+    const hasB = ann.spans.some((s: CharSpan) => spansEqual(s, { start: b.start, end: b.end }))
+    return hasA && hasB
+  })
+}
+
+function wordInNotePick(w: SentencePiece & { kind: 'word' }) {
+  return notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: w.start, end: w.end }))
+}
+
+function wordInDragPreview(w: SentencePiece & { kind: 'word' }) {
+  const prev = dragPreviewLoHi.value
+  if (!prev || (!constituentMode.value && !notePickMode.value)) return false
+  return pieceOverlapsCharRange(w, prev.lo, prev.hi)
+}
+
+/** 空格两侧词同属一段高亮时铺满背景，避免「断裂」 */
+function spaceBridgeOverlay(pi: number): Record<string, string> {
+  const arr = interactivePieces.value
+  const p = arr[pi]
+  if (!p || p.kind !== 'space') return {}
+  const [wa, wb] = neighborWordPieces(pi)
+  if (!wa || !wb) return {}
+
+  if (wordInNotePick(wa) && wordInNotePick(wb)) {
+    return { backgroundColor: 'rgba(224, 242, 254, 0.75)' }
+  }
+  if (isWordInSavedAnnotation(wa) && isWordInSavedAnnotation(wb) && wordsShareSavedAnnotation(wa, wb)) {
+    return { backgroundColor: 'rgba(224, 242, 254, 0.55)' }
+  }
+  if (wordInDragPreview(wa) && wordInDragPreview(wb) && (constituentMode.value || notePickMode.value)) {
+    return { backgroundColor: 'rgba(254, 226, 226, 0.65)' }
+  }
+  return {}
+}
+
 function cleanToken(raw: string) {
   return raw.replace(/[.,!?;:]/g, '').trim().toLowerCase()
 }
@@ -392,7 +454,7 @@ function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   if (inNotePick) {
     return {
       ...base,
-      'bg-sky-100/90 text-sky-900 dark:bg-sky-950/55 dark:text-sky-50': true
+      'text-sky-900 dark:text-sky-100': true
     }
   }
   if (clean && selectedWords.value.includes(clean)) {
@@ -404,34 +466,33 @@ function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   return base
 }
 
-/** 已保存批注 / 滑动预览：内联颜色，避免部分机型 Tailwind 不透明显示异常 */
+/** 已保存批注 / 选词 / 滑动预览：内联颜色；预览统一浅红 */
 function wordOverlayStyle(p: SentencePiece & { kind: 'word' }) {
   const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
-  if (inNotePick) return {}
+  if (inNotePick) {
+    return {
+      backgroundColor: 'rgba(224, 242, 254, 0.75)',
+      borderRadius: '2px'
+    }
+  }
 
   const prev = dragPreviewLoHi.value
   const inPreview =
     prev != null &&
     (constituentMode.value || notePickMode.value) &&
     pieceOverlapsCharRange(p, prev.lo, prev.hi)
-  if (inPreview && constituentMode.value) {
+  // 划成分、批注选词下滑动预览均为浅红（降低饱和度）
+  if (inPreview && (constituentMode.value || notePickMode.value)) {
     return {
-      backgroundColor: 'rgba(248, 113, 113, 0.4)',
-      boxShadow: 'inset 0 0 0 1px rgba(220, 38, 38, 0.35)',
-      borderRadius: '3px'
-    }
-  }
-  if (inPreview && notePickMode.value) {
-    return {
-      backgroundColor: 'rgba(56, 189, 248, 0.42)',
-      boxShadow: 'inset 0 0 0 1px rgba(3, 105, 161, 0.45)',
-      borderRadius: '3px'
+      backgroundColor: 'rgba(254, 226, 226, 0.65)',
+      boxShadow: 'inset 0 0 0 1px rgba(252, 165, 165, 0.35)',
+      borderRadius: '2px'
     }
   }
   if (isWordInSavedAnnotation(p)) {
     return {
-      backgroundColor: 'rgba(125, 211, 252, 0.75)',
-      borderRadius: '3px'
+      backgroundColor: 'rgba(224, 242, 254, 0.55)',
+      borderRadius: '2px'
     }
   }
   return {}
@@ -447,7 +508,7 @@ function hlPieceDragPreviewClass(p: SentencePiece & { kind: 'hl' }) {
 function hlOverlayStyle(p: SentencePiece & { kind: 'hl' }) {
   const prev = dragPreviewLoHi.value
   if (!prev || !constituentMode.value || !pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
-  return { boxShadow: 'inset 0 0 0 2px rgba(220, 38, 38, 0.45)' }
+  return { boxShadow: 'inset 0 0 0 2px rgba(252, 165, 165, 0.4)' }
 }
 
 function resetLocalAnnotationState() {
@@ -759,10 +820,10 @@ function goToSummary() {
           </button>
         </div>
         <p v-if="constituentMode" class="text-xs text-muted-foreground -mt-2">
-          点词或<strong>滑动</strong>跨选；滑动时会<strong>浅色预览</strong>将划分区间。点同一词取消划分；点浅红整段清除。此模式下不可查义。
+          点词或<strong>滑动</strong>跨选；滑动时<strong>浅红预览</strong>。点同一词取消划分；点浅红整段清除。此模式下不可查义。
         </p>
         <p v-else-if="notePickMode" class="text-xs text-muted-foreground -mt-2">
-          点词或<strong>滑动</strong>多选（滑动时<strong>浅蓝预览</strong>）→「填写批注」在中间输入；弹窗打开时不能再增选。已保存批注的词带<strong>浅蓝底</strong>。
+          点词或<strong>滑动</strong>多选（滑动时<strong>浅红预览</strong>）→「填写批注」在中间输入；弹窗打开时不能再增选。已保存批注为<strong>更浅蓝底连成一片</strong>。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
           未提交翻译时点词只用于选生词、不弹释义；提交后可点词查义。电脑也可
@@ -796,8 +857,13 @@ function goToSummary() {
             @pointerup="onSentencePointerUp"
             @pointercancel="onSentencePointerCancel"
           >
-            <template v-for="p in interactivePieces" :key="`${p.kind}-${p.start}-${p.end}`">
-              <span v-if="p.kind === 'space'" class="whitespace-pre select-none">{{ p.text }}</span>
+            <template v-for="(p, pi) in interactivePieces" :key="`${p.kind}-${p.start}-${p.end}`">
+              <span
+                v-if="p.kind === 'space'"
+                class="whitespace-pre select-none"
+                :style="spaceBridgeOverlay(pi)"
+                >{{ p.text }}</span
+              >
               <span
                 v-else-if="p.kind === 'hl'"
                 class="rounded px-0.5 bg-red-100/90 dark:bg-red-950/40 text-foreground transition-shadow"
