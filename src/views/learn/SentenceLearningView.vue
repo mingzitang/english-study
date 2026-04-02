@@ -40,6 +40,8 @@ const suppressNextWordClick = ref(false)
 let dragPointerId: number | null = null
 type DragState = { anchor: CharSpan; last: CharSpan; startX: number; startY: number }
 const dragState = ref<DragState | null>(null)
+/** 滑动过程中预览区间（字符偏移） */
+const dragPreviewLoHi = ref<{ lo: number; hi: number } | null>(null)
 const DRAG_DISTANCE_PX = 10
 
 const userTranslation = ref('')
@@ -182,16 +184,22 @@ function setWordElRef(p: SentencePiece, el: unknown) {
   else wordElRefs.delete(k)
 }
 
+function readSpanAttrs(el: HTMLElement): CharSpan | null {
+  let s = el.dataset.spStart ?? el.getAttribute('data-sp-start')
+  let e = el.dataset.spEnd ?? el.getAttribute('data-sp-end')
+  if (s == null || s === '' || e == null || e === '') return null
+  const start = Number(s)
+  const end = Number(e)
+  if (Number.isNaN(start) || Number.isNaN(end)) return null
+  return { start, end }
+}
+
 function getCharSpanFromTarget(target: EventTarget | null): CharSpan | null {
   let el = target as HTMLElement | null
   const root = sentenceInteractRef.value
   while (el && el !== root) {
-    const ds = el.dataset
-    if (ds.spStart != null && ds.spEnd != null) {
-      const start = Number(ds.spStart)
-      const end = Number(ds.spEnd)
-      if (!Number.isNaN(start) && !Number.isNaN(end)) return { start, end }
-    }
+    const sp = readSpanAttrs(el)
+    if (sp) return sp
     el = el.parentElement
   }
   return null
@@ -224,6 +232,7 @@ function onSentencePointerDown(e: PointerEvent) {
   if (!constituentMode.value && !notePickMode.value) return
   const sp = getCharSpanFromTarget(e.target)
   if (!sp) return
+  dragPreviewLoHi.value = null
   dragPointerId = e.pointerId
   dragState.value = { anchor: sp, last: sp, startX: e.clientX, startY: e.clientY }
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
@@ -234,6 +243,13 @@ function onSentencePointerMove(e: PointerEvent) {
   const el = document.elementFromPoint(e.clientX, e.clientY)
   const sp = getCharSpanFromTarget(el)
   if (sp) dragState.value.last = sp
+  const ds = dragState.value
+  const lo = Math.min(ds.anchor.start, ds.last.start)
+  const hi = Math.max(ds.anchor.end, ds.last.end)
+  const dist = Math.hypot(e.clientX - ds.startX, e.clientY - ds.startY)
+  const rangeChanged = ds.anchor.start !== ds.last.start || ds.anchor.end !== ds.last.end
+  if (dist > 4 || rangeChanged) dragPreviewLoHi.value = { lo, hi }
+  else dragPreviewLoHi.value = null
 }
 
 function onSentencePointerUp(e: PointerEvent) {
@@ -246,6 +262,7 @@ function onSentencePointerUp(e: PointerEvent) {
   const ds = dragState.value
   dragPointerId = null
   dragState.value = null
+  dragPreviewLoHi.value = null
 
   const dist = Math.hypot(e.clientX - ds.startX, e.clientY - ds.startY)
   const rangeChanged = ds.anchor.start !== ds.last.start || ds.anchor.end !== ds.last.end
@@ -283,6 +300,7 @@ function onSentencePointerCancel(e: PointerEvent) {
     }
     dragPointerId = null
     dragState.value = null
+    dragPreviewLoHi.value = null
   }
 }
 
@@ -332,6 +350,17 @@ function onAnnotationDeleteClick(p: SentencePiece) {
   if (a) removeAnnotation(a.id)
 }
 
+/** 该词块是否属于已保存批注（任意一段完全命中） */
+function isWordInSavedAnnotation(p: SentencePiece & { kind: 'word' }) {
+  return annotations.value.some((a: LocalAnnotation) =>
+    a.spans.some((s: CharSpan) => s.start === p.start && s.end === p.end)
+  )
+}
+
+function pieceOverlapsCharRange(p: SentencePiece, lo: number, hi: number) {
+  return p.start < hi && p.end > lo
+}
+
 function cleanToken(raw: string) {
   return raw.replace(/[.,!?;:]/g, '').trim().toLowerCase()
 }
@@ -339,12 +368,56 @@ function cleanToken(raw: string) {
 function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   const clean = cleanToken(p.text)
   const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
-  return {
-    'bg-sky-100/90 text-sky-900 dark:bg-sky-950/55 dark:text-sky-50 rounded px-0.5': inNotePick,
-    'bg-sky-100 text-sky-700 px-1 rounded':
-      clean && selectedWords.value.includes(clean) && !inNotePick,
-    'cursor-pointer hover:text-primary transition-colors': true
+  const savedAnn = isWordInSavedAnnotation(p)
+  const prev = dragPreviewLoHi.value
+  const inPreview =
+    prev != null &&
+    (constituentMode.value || notePickMode.value) &&
+    pieceOverlapsCharRange(p, prev.lo, prev.hi)
+
+  const base: Record<string, boolean> = {
+    'cursor-pointer hover:text-primary transition-colors': true,
+    'rounded px-0.5': true
   }
+
+  if (inPreview && constituentMode.value) {
+    return {
+      ...base,
+      'bg-red-300/50 dark:bg-red-900/40 ring-1 ring-red-400/40': true
+    }
+  }
+  if (inPreview && notePickMode.value) {
+    return {
+      ...base,
+      'bg-sky-400/45 dark:bg-sky-700/45 ring-1 ring-sky-500/40': true
+    }
+  }
+  if (inNotePick) {
+    return {
+      ...base,
+      'bg-sky-100/90 text-sky-900 dark:bg-sky-950/55 dark:text-sky-50': true
+    }
+  }
+  if (savedAnn) {
+    return {
+      ...base,
+      'bg-sky-200/70 dark:bg-sky-900/45 text-foreground': true
+    }
+  }
+  if (clean && selectedWords.value.includes(clean)) {
+    return {
+      ...base,
+      'bg-sky-100 text-sky-700': true
+    }
+  }
+  return base
+}
+
+function hlPieceDragPreviewClass(p: SentencePiece & { kind: 'hl' }) {
+  const prev = dragPreviewLoHi.value
+  if (!prev || !constituentMode.value) return {}
+  if (!pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
+  return { 'ring-2 ring-red-500/50 ring-inset': true }
 }
 
 function resetLocalAnnotationState() {
@@ -357,6 +430,7 @@ function resetLocalAnnotationState() {
   expandedAnnotationId.value = null
   dragPointerId = null
   dragState.value = null
+  dragPreviewLoHi.value = null
   constituentMode.value = false
   notePickMode.value = false
   selRemove()
@@ -635,10 +709,10 @@ function goToSummary() {
           </button>
         </div>
         <p v-if="constituentMode" class="text-xs text-muted-foreground -mt-2">
-          可点词或<strong>在句子上滑动</strong>跨多词划分；点同一词取消；点浅红整段清除。此模式下不可查义。
+          点词或<strong>滑动</strong>跨选；滑动时会<strong>浅色预览</strong>将划分区间。点同一词取消划分；点浅红整段清除。此模式下不可查义。
         </p>
         <p v-else-if="notePickMode" class="text-xs text-muted-foreground -mt-2">
-          点词或<strong>滑动</strong>多选（仅当段位置，同形词互不影响）→ 点「填写批注」在<strong>中间</strong>输入；打开弹窗时不能再增选。提交翻译后可点词查义。
+          点词或<strong>滑动</strong>多选（滑动时<strong>浅蓝预览</strong>）→「填写批注」在中间输入；弹窗打开时不能再增选。已保存批注的词带<strong>浅蓝底</strong>。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
           未提交翻译时点词只用于选生词、不弹释义；提交后可点词查义。电脑也可
@@ -661,8 +735,9 @@ function goToSummary() {
           <p class="text-xs text-muted-foreground mb-2">英文原句</p>
           <p
             ref="sentenceInteractRef"
-            class="text-foreground leading-relaxed text-lg"
+            class="text-foreground leading-relaxed text-lg relative overflow-visible [overflow-wrap:anywhere]"
             :class="constituentMode || notePickMode ? 'touch-pan-y select-none' : ''"
+            style="-webkit-user-select: none; user-select: none"
             @pointerdown="onSentencePointerDown"
             @pointermove="onSentencePointerMove"
             @pointerup="onSentencePointerUp"
@@ -672,37 +747,39 @@ function goToSummary() {
               <span v-if="p.kind === 'space'" class="whitespace-pre select-none">{{ p.text }}</span>
               <span
                 v-else-if="p.kind === 'hl'"
-                class="rounded px-0.5 bg-red-100/90 dark:bg-red-950/40 text-foreground"
-                :class="constituentMode ? 'cursor-pointer' : ''"
-                :data-sp-start="p.start"
-                :data-sp-end="p.end"
+                class="rounded px-0.5 bg-red-100/90 dark:bg-red-950/40 text-foreground transition-shadow"
+                :class="[constituentMode ? 'cursor-pointer' : '', hlPieceDragPreviewClass(p)]"
+                :data-sp-start="String(p.start)"
+                :data-sp-end="String(p.end)"
                 @click="onWordPieceClick(p, $event)"
                 >{{ p.text }}</span
               >
               <span
                 v-else
-                class="relative inline-block align-baseline max-w-full"
+                class="relative inline-block align-baseline max-w-full overflow-visible"
                 :class="wordPieceClasses(p)"
-                :data-sp-start="p.start"
-                :data-sp-end="p.end"
+                :data-sp-start="String(p.start)"
+                :data-sp-end="String(p.end)"
                 :ref="(el) => setWordElRef(p, el)"
                 @click="onWordPieceClick(p, $event)"
               >
+                <!-- 紧贴词上方、无气泡装饰；横向小字 -->
                 <span
                   v-if="savedAnnotationAtPiece(p)"
-                  class="absolute bottom-full left-1/2 z-10 mb-1 w-max max-w-[min(20rem,94vw)] -translate-x-1/2 [writing-mode:horizontal-tb]"
+                  class="pointer-events-auto absolute z-10 block w-max max-w-[min(18rem,calc(100vw-2rem))] text-left [writing-mode:horizontal-tb]"
+                  style="bottom: 100%; left: 0; margin-bottom: 0; transform: translate3d(0, 3px, 0)"
+                  @click.stop="onAnnotationBubbleClick(p)"
                 >
                   <span
-                    class="relative inline-block rounded-md border border-sky-200 bg-sky-100/95 px-1.5 py-0.5 text-left text-[7px] leading-tight text-sky-950 shadow-sm dark:border-sky-700 dark:bg-sky-950/90 dark:text-sky-50"
-                    @click.stop="onAnnotationBubbleClick(p)"
+                    class="relative inline-block px-0.5 py-0 text-[8px] font-normal leading-snug tracking-normal text-sky-900 dark:text-sky-100"
                   >
-                    <span class="whitespace-normal break-words [word-break:break-word]">{{
+                    <span class="block whitespace-normal break-words [word-break:break-word]">{{
                       savedAnnotationDisplayText(p)
                     }}</span>
                     <button
                       v-if="savedAnnotationAtPiece(p) && expandedAnnotationId === savedAnnotationAtPiece(p)?.id"
                       type="button"
-                      class="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-background text-[11px] font-light leading-none text-muted-foreground shadow-sm hover:border-destructive hover:text-destructive"
+                      class="absolute -right-2 -top-2 flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-background/95 px-0.5 text-sm font-light leading-none text-muted-foreground shadow border border-border active:text-destructive"
                       aria-label="删除批注"
                       @click.stop="onAnnotationDeleteClick(p)"
                     >
