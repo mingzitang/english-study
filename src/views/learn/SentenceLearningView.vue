@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLearningStore } from '@/stores/learning'
 import type { CustomWordInput } from '@/types'
@@ -8,10 +8,14 @@ import AppButton from '@/components/common/AppButton.vue'
 
 /** 本地浅红划分（不落库） */
 type HighlightRange = { id: string; start: number; end: number }
-/** 顶部批注卡片（不落库） */
-type LocalAnnotation = { id: string; words: string[]; text: string }
+type CharSpan = { start: number; end: number }
+/** 批注锚在句中字符区间（可多段），不落库 */
+type LocalAnnotation = { id: string; spans: CharSpan[]; text: string }
 
-type SentencePiece = { kind: 'hl'; text: string } | { kind: 'word'; text: string } | { kind: 'space'; text: string }
+type SentencePiece =
+  | { kind: 'hl'; text: string; start: number; end: number }
+  | { kind: 'word'; text: string; start: number; end: number }
+  | { kind: 'space'; text: string; start: number; end: number }
 
 const router = useRouter()
 const learningStore = useLearningStore()
@@ -22,7 +26,12 @@ const constituentMode = ref(false)
 const notePickMode = ref(false)
 const highlights = ref<HighlightRange[]>([])
 const annotations = ref<LocalAnnotation[]>([])
-const noteWordsBuffer = ref<string[]>([])
+/** 批注选词：按句中位置区分同形词（如多个 the） */
+const notePickSpans = ref<CharSpan[]>([])
+const draftNoteText = ref('')
+/** 词块 DOM，用于把草稿框贴在词上方 */
+const wordElRefs = new Map<string, HTMLElement>()
+const noteDraftPopoverStyle = ref<Record<string, string>>({ display: 'none' })
 
 const userTranslation = ref('')
 const showAnalysis = ref(false)
@@ -45,6 +54,15 @@ const lookupMessage = ref('')
 
 const sentence = computed(() => learningStore.todaySentence)
 const feedback = computed(() => learningStore.sentenceAIFeedback)
+
+const draftSnippet = computed(() => {
+  const full = sentence.value?.content ?? ''
+  return [...notePickSpans.value]
+    .sort((a, b) => a.start - b.start)
+    .map(s => full.slice(s.start, s.end))
+    .filter(Boolean)
+    .join(' ')
+})
 const isLoading = computed(() => learningStore.loading)
 /** 避免首屏未加载完时把「无句子」当成「已完成」 */
 const sentenceLoadState = ref<'pending' | 'loading' | 'done'>('pending')
@@ -98,44 +116,6 @@ function segmentsFromMerged(
   return out
 }
 
-function getSelectionOffsets(container: HTMLElement): { start: number; end: number } | null {
-  const sel = window.getSelection()
-  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null
-  const range = sel.getRangeAt(0)
-  if (!container.contains(range.commonAncestorContainer)) return null
-  const pre = range.cloneRange()
-  pre.selectNodeContents(container)
-  pre.setEnd(range.startContainer, range.startOffset)
-  const start = pre.toString().length
-  const end = start + range.toString().length
-  return { start, end }
-}
-
-function commitConstituentSelection() {
-  if (!constituentMode.value || !sentence.value) return
-  const el = sentenceInteractRef.value
-  if (!el) return
-  const o = getSelectionOffsets(el)
-  if (!o || o.start === o.end) return
-  const n = sentence.value.content.length
-  const start = Math.max(0, Math.min(o.start, n))
-  const end = Math.max(start, Math.min(o.end, n))
-  if (end <= start) return
-  highlights.value.push({ id: randomId(), start, end })
-  selRemove()
-}
-
-/**
- * 桌面用 mouseup；触屏上选区往往在 pointerup 之后才落盘，延后一帧再读 Selection。
- */
-function onConstituentPointerUp() {
-  if (!constituentMode.value || !sentence.value) return
-  const run = () => commitConstituentSelection()
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(run)
-  })
-}
-
 function selRemove() {
   const sel = window.getSelection()
   sel?.removeAllRanges()
@@ -156,47 +136,150 @@ const interactivePieces = computed((): SentencePiece[] => {
   if (!full) return []
   const segs = segmentPieces.value
   const out: SentencePiece[] = []
+  let offset = 0
   for (const s of segs) {
     if (s.highlighted) {
-      if (s.text) out.push({ kind: 'hl', text: s.text })
+      if (s.text) {
+        const start = offset
+        offset += s.text.length
+        out.push({ kind: 'hl', text: s.text, start, end: offset })
+      }
       continue
     }
     const parts = s.text.split(/(\s+)/)
     for (const part of parts) {
       if (!part) continue
-      if (/^\s+$/.test(part)) out.push({ kind: 'space', text: part })
-      else out.push({ kind: 'word', text: part })
+      const start = offset
+      offset += part.length
+      if (/^\s+$/.test(part)) out.push({ kind: 'space', text: part, start, end: offset })
+      else out.push({ kind: 'word', text: part, start, end: offset })
     }
   }
   return out
 })
 
+function spanKey(sp: CharSpan) {
+  return `${sp.start}-${sp.end}`
+}
+
+function spansEqual(a: CharSpan, b: CharSpan) {
+  return a.start === b.start && a.end === b.end
+}
+
+function setWordElRef(p: SentencePiece, el: unknown) {
+  if (p.kind !== 'word') return
+  const k = spanKey({ start: p.start, end: p.end })
+  if (el) wordElRefs.set(k, el as HTMLElement)
+  else wordElRefs.delete(k)
+}
+
+function refreshNoteDraftPopover() {
+  if (notePickSpans.value.length === 0) {
+    noteDraftPopoverStyle.value = { display: 'none' }
+    return
+  }
+  const ordered = [...notePickSpans.value].sort((a, b) => a.start - b.start)
+  const first = ordered[0]
+  const el = wordElRefs.get(spanKey(first))
+  if (!el) {
+    noteDraftPopoverStyle.value = { display: 'none' }
+    return
+  }
+  const r = el.getBoundingClientRect()
+  noteDraftPopoverStyle.value = {
+    display: 'block',
+    position: 'fixed',
+    top: `${Math.max(8, r.top - 6)}px`,
+    left: `${r.left + r.width / 2}px`,
+    transform: 'translate(-50%, -100%)',
+    zIndex: '50'
+  }
+}
+
+function toggleConstituentRange(span: CharSpan) {
+  const i = highlights.value.findIndex((h: HighlightRange) => h.start === span.start && h.end === span.end)
+  if (i >= 0) highlights.value.splice(i, 1)
+  else highlights.value.push({ id: randomId(), start: span.start, end: span.end })
+}
+
+/** 点击已合并的浅红块：去掉与该显示块相交的划分 */
+function removeHighlightsOverlappingPiece(p: SentencePiece & { kind: 'hl' }) {
+  highlights.value = highlights.value.filter((h: HighlightRange) => !(h.start < p.end && h.end > p.start))
+}
+
+function toggleNoteSpan(span: CharSpan) {
+  const i = notePickSpans.value.findIndex((s: CharSpan) => spansEqual(s, span))
+  if (i >= 0) notePickSpans.value.splice(i, 1)
+  else notePickSpans.value.push(span)
+  nextTick(() => refreshNoteDraftPopover())
+}
+
+/** 批注文案挂在这段词上方（仅在该批注首段位置显示） */
+function savedAnnotationAtPiece(p: SentencePiece): LocalAnnotation | null {
+  if (p.kind !== 'word') return null
+  for (const a of annotations.value) {
+    if (a.spans.length === 0) continue
+    const sorted = [...a.spans].sort((x: CharSpan, y: CharSpan) => x.start - y.start)
+    const head = sorted[0]
+    if (head.start === p.start && head.end === p.end) return a
+  }
+  return null
+}
+
+function savedAnnotationDisplayText(p: SentencePiece): string {
+  const a = savedAnnotationAtPiece(p)
+  if (!a) return ''
+  const t = a.text.trim()
+  return t ? t : '（无文字）'
+}
+
+function removeAnnotationForPiece(p: SentencePiece) {
+  const a = savedAnnotationAtPiece(p)
+  if (a) removeAnnotation(a.id)
+}
+
 function cleanToken(raw: string) {
   return raw.replace(/[.,!?;:]/g, '').trim().toLowerCase()
 }
 
-function wordPieceClass(raw: string) {
-  const clean = cleanToken(raw)
+function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
+  const clean = cleanToken(p.text)
+  const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
   return {
-    'bg-sky-100 text-sky-700 px-1 rounded': clean && selectedWords.value.includes(clean),
-    'ring-1 ring-primary/50 rounded px-0.5': clean && noteWordsBuffer.value.includes(clean)
+    'bg-sky-100/90 text-sky-900 dark:bg-sky-950/55 dark:text-sky-50 rounded px-0.5': inNotePick,
+    'bg-sky-100 text-sky-700 px-1 rounded':
+      clean && selectedWords.value.includes(clean) && !inNotePick,
+    'cursor-pointer hover:text-primary transition-colors': true
   }
 }
 
 function resetLocalAnnotationState() {
   highlights.value = []
   annotations.value = []
-  noteWordsBuffer.value = []
+  notePickSpans.value = []
+  draftNoteText.value = ''
+  wordElRefs.clear()
+  noteDraftPopoverStyle.value = { display: 'none' }
   constituentMode.value = false
   notePickMode.value = false
   selRemove()
 }
 
 watch(constituentMode, (on: boolean) => {
-  if (on) notePickMode.value = false
+  if (on) {
+    notePickMode.value = false
+    notePickSpans.value = []
+    draftNoteText.value = ''
+    noteDraftPopoverStyle.value = { display: 'none' }
+  }
 })
 watch(notePickMode, (on: boolean) => {
   if (on) constituentMode.value = false
+  else {
+    notePickSpans.value = []
+    draftNoteText.value = ''
+    noteDraftPopoverStyle.value = { display: 'none' }
+  }
 })
 
 watch(
@@ -206,11 +289,27 @@ watch(
   }
 )
 
+watch(
+  interactivePieces,
+  () => {
+    nextTick(() => refreshNoteDraftPopover())
+  },
+  { deep: true }
+)
+
+function onScrollOrResizeRefreshPopover() {
+  refreshNoteDraftPopover()
+}
+
 onMounted(() => {
   loadSentence()
+  window.addEventListener('scroll', onScrollOrResizeRefreshPopover, true)
+  window.addEventListener('resize', onScrollOrResizeRefreshPopover)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('scroll', onScrollOrResizeRefreshPopover, true)
+  window.removeEventListener('resize', onScrollOrResizeRefreshPopover)
   resetLocalAnnotationState()
 })
 
@@ -232,41 +331,65 @@ function selectWord(word: string) {
   selectedWords.value = [word]
 }
 
-function toggleNoteWord(clean: string) {
-  const i = noteWordsBuffer.value.indexOf(clean)
-  if (i >= 0) noteWordsBuffer.value.splice(i, 1)
-  else noteWordsBuffer.value.push(clean)
-}
-
-function addAnnotationCard() {
-  const words = [...noteWordsBuffer.value]
-  if (words.length === 0) return
+function confirmDraftNote() {
+  if (notePickSpans.value.length === 0) return
   annotations.value.push({
     id: randomId(),
-    words,
-    text: ''
+    spans: notePickSpans.value.map((s: CharSpan) => ({ ...s })),
+    text: draftNoteText.value.trim()
   })
-  noteWordsBuffer.value = []
+  notePickSpans.value = []
+  draftNoteText.value = ''
+  noteDraftPopoverStyle.value = { display: 'none' }
+}
+
+function clearNotePickDraft() {
+  notePickSpans.value = []
+  draftNoteText.value = ''
+  noteDraftPopoverStyle.value = { display: 'none' }
 }
 
 function removeAnnotation(id: string) {
   annotations.value = annotations.value.filter((a: LocalAnnotation) => a.id !== id)
 }
 
-async function handleWordClick(word: string, e?: MouseEvent) {
-  const cleanWord = word.replace(/[.,!?;:]/g, '').trim().toLowerCase()
+function onWordPieceClick(p: SentencePiece, e: MouseEvent) {
+  if (p.kind === 'hl') {
+    if (constituentMode.value) {
+      e.preventDefault()
+      removeHighlightsOverlappingPiece(p)
+    }
+    return
+  }
+  if (p.kind !== 'word') return
+
+  const cleanWord = cleanToken(p.text)
   if (!cleanWord) return
-  if (constituentMode.value) return
-  if (notePickMode.value) {
-    e?.preventDefault()
-    toggleNoteWord(cleanWord)
-    return
-  }
-  if (e && (e.ctrlKey || e.metaKey)) {
+
+  if (constituentMode.value) {
     e.preventDefault()
-    toggleNoteWord(cleanWord)
+    toggleConstituentRange({ start: p.start, end: p.end })
     return
   }
+  if (notePickMode.value) {
+    e.preventDefault()
+    toggleNoteSpan({ start: p.start, end: p.end })
+    return
+  }
+  if (!feedback.value) {
+    e.preventDefault()
+    selectWord(cleanWord)
+    return
+  }
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault()
+    toggleNoteSpan({ start: p.start, end: p.end })
+    return
+  }
+  void runWordLookup(cleanWord)
+}
+
+async function runWordLookup(cleanWord: string) {
   selectWord(cleanWord)
   lookupVisible.value = true
   lookupLoading.value = true
@@ -383,38 +506,6 @@ function goToSummary() {
       
       <!-- 句子内容 -->
       <div v-else-if="sentence" class="p-4 space-y-4">
-        <!-- 本地批注（纯前端，离开页面即清空） -->
-        <div
-          v-if="annotations.length > 0"
-          class="sticky top-0 z-20 -mx-1 border-b border-border bg-background/95 backdrop-blur-sm py-3 px-1 space-y-2 mb-1"
-        >
-          <p class="text-xs font-medium text-muted-foreground">批注（仅本页有效）</p>
-          <div
-            v-for="a in annotations"
-            :key="a.id"
-            class="rounded-lg border border-border bg-card p-3 shadow-sm"
-          >
-            <div class="flex justify-between gap-2 mb-2">
-              <span class="text-xs font-medium text-foreground truncate" :title="a.words.join(' ')">{{
-                a.words.join(' · ')
-              }}</span>
-              <button
-                type="button"
-                class="text-xs text-muted-foreground hover:text-destructive shrink-0"
-                @click="removeAnnotation(a.id)"
-              >
-                删除
-              </button>
-            </div>
-            <textarea
-              v-model="a.text"
-              rows="2"
-              class="w-full text-sm rounded-md border border-border bg-background px-2 py-1.5 text-foreground placeholder:text-muted-foreground resize-none focus:outline-none focus:ring-1 focus:ring-primary"
-              placeholder="输入备注…"
-            />
-          </div>
-        </div>
-
         <div class="flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -433,14 +524,6 @@ function goToSummary() {
             清除划分
           </button>
           <button
-            v-if="constituentMode"
-            type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10"
-            @click="commitConstituentSelection"
-          >
-            应用当前选中
-          </button>
-          <button
             v-if="!constituentMode"
             type="button"
             class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
@@ -449,24 +532,17 @@ function goToSummary() {
           >
             {{ notePickMode ? '退出批注选词' : '批注选词' }}
           </button>
-          <button
-            type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10 disabled:opacity-40 disabled:pointer-events-none"
-            :disabled="noteWordsBuffer.length === 0"
-            @click="addAnnotationCard"
-          >
-            添加批注
-          </button>
         </div>
         <p v-if="constituentMode" class="text-xs text-muted-foreground -mt-2">
-          在句子上长按并拖选英文，松手后应标成浅红；若未生效可再点「应用当前选中」。此模式下不可点词查义。
+          直接点词即可标浅红（再点同一词取消）；点已标红的整段可清除该段划分。此模式下不可查义。
         </p>
         <p v-else-if="notePickMode" class="text-xs text-muted-foreground -mt-2">
-          直接点词可加入/取消批注候选（可多词），选好后点「添加批注」；再点「退出批注选词」恢复点词查义。
+          点选词（仅当前位置高亮，同形词互不影响）；在句子上方浅蓝框里写批注并保存。退出后恢复点词查义（需已提交翻译）。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
-          点词查义、加入生词本；电脑可按住 <kbd class="px-1 rounded bg-secondary text-[10px]">Ctrl</kbd> /
-          <kbd class="px-1 rounded bg-secondary text-[10px]">⌘</kbd> 多选后「添加批注」。手机请开「批注选词」再点词。
+          未提交翻译时点词只用于选生词、不弹释义；提交后可点词查义。电脑也可
+          <kbd class="px-1 rounded bg-secondary text-[10px]">Ctrl</kbd> /
+          <kbd class="px-1 rounded bg-secondary text-[10px]">⌘</kbd> 点多词批注。
         </p>
 
         <!-- 难度和来源 -->
@@ -482,40 +558,41 @@ function goToSummary() {
         <!-- 英文句子 -->
         <div class="bg-card rounded-xl p-4 border border-border">
           <p class="text-xs text-muted-foreground mb-2">英文原句</p>
-          <p
-            ref="sentenceInteractRef"
-            class="text-foreground leading-relaxed text-lg"
-            :class="constituentMode ? 'select-text cursor-text' : ''"
-            @pointerup="onConstituentPointerUp"
-          >
-            <template v-if="!constituentMode">
-              <template v-for="(p, index) in interactivePieces" :key="index">
-                <span v-if="p.kind === 'space'" class="whitespace-pre select-none">{{ p.text }}</span>
-                <span
-                  v-else-if="p.kind === 'hl'"
-                  class="bg-red-100/90 dark:bg-red-950/40 text-foreground rounded px-0.5"
-                  >{{ p.text }}</span
-                >
-                <span
-                  v-else
-                  class="cursor-pointer hover:text-primary transition-colors"
-                  :class="wordPieceClass(p.text)"
-                  @click="handleWordClick(p.text, $event)"
-                  >{{ p.text }}</span
-                >
-              </template>
-            </template>
-            <template v-else>
+          <p ref="sentenceInteractRef" class="text-foreground leading-relaxed text-lg">
+            <template v-for="p in interactivePieces" :key="`${p.kind}-${p.start}-${p.end}`">
+              <span v-if="p.kind === 'space'" class="whitespace-pre select-none">{{ p.text }}</span>
               <span
-                v-for="(seg, si) in segmentPieces"
-                :key="si"
-                :class="
-                  seg.highlighted
-                    ? 'bg-red-100/90 dark:bg-red-950/40 text-foreground rounded px-0.5'
-                    : ''
-                "
-                >{{ seg.text }}</span
+                v-else-if="p.kind === 'hl'"
+                class="rounded px-0.5 bg-red-100/90 dark:bg-red-950/40 text-foreground"
+                :class="constituentMode ? 'cursor-pointer' : ''"
+                @click="onWordPieceClick(p, $event)"
+                >{{ p.text }}</span
               >
+              <span
+                v-else
+                class="relative inline-block align-baseline"
+                :class="wordPieceClasses(p)"
+                :ref="(el) => setWordElRef(p, el)"
+                @click="onWordPieceClick(p, $event)"
+              >
+                <span
+                  v-if="savedAnnotationAtPiece(p)"
+                  class="absolute bottom-full left-1/2 z-10 mb-1 flex max-w-[min(14rem,85vw)] -translate-x-1/2 flex-col items-center gap-0.5"
+                >
+                  <span
+                    class="rounded-md border border-sky-200 bg-sky-100/95 px-1.5 py-0.5 text-center text-[10px] leading-snug text-sky-950 shadow-sm line-clamp-4 dark:border-sky-700 dark:bg-sky-950/90 dark:text-sky-50"
+                    >{{ savedAnnotationDisplayText(p) }}</span
+                  >
+                  <button
+                    type="button"
+                    class="text-[10px] text-muted-foreground hover:text-destructive"
+                    @click.stop="removeAnnotationForPiece(p)"
+                  >
+                    删除
+                  </button>
+                </span>
+                {{ p.text }}
+              </span>
             </template>
           </p>
           
@@ -712,6 +789,40 @@ function goToSummary() {
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-show="notePickSpans.length > 0"
+        class="rounded-xl border-2 border-sky-200 bg-sky-50 p-2.5 shadow-xl dark:border-sky-700 dark:bg-sky-950/95 w-[min(92vw,20rem)] pointer-events-auto"
+        :style="noteDraftPopoverStyle"
+      >
+        <p class="text-[11px] font-medium text-sky-900 dark:text-sky-100 line-clamp-2" :title="draftSnippet">
+          {{ draftSnippet }}
+        </p>
+        <textarea
+          v-model="draftNoteText"
+          rows="3"
+          class="mt-1.5 w-full rounded-md border border-sky-200 bg-white/90 px-2 py-1.5 text-sm text-foreground placeholder:text-sky-600/50 dark:border-sky-800 dark:bg-sky-900/60 dark:placeholder:text-sky-400/40 resize-none focus:outline-none focus:ring-2 focus:ring-sky-400"
+          placeholder="在此输入批注…"
+        />
+        <div class="mt-2 flex justify-end gap-2">
+          <button
+            type="button"
+            class="text-xs text-muted-foreground px-2 py-1 rounded-md hover:bg-sky-100 dark:hover:bg-sky-900"
+            @click="clearNotePickDraft"
+          >
+            清空所选
+          </button>
+          <button
+            type="button"
+            class="text-xs rounded-md bg-sky-600 text-white px-3 py-1.5 hover:bg-sky-700"
+            @click="confirmDraftNote"
+          >
+            保存批注
+          </button>
+        </div>
+      </div>
+    </Teleport>
 
     <div
       v-if="showWordModal"
