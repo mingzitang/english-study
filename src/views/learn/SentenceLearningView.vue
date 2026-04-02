@@ -18,6 +18,8 @@ const learningStore = useLearningStore()
 
 const sentenceInteractRef = ref<HTMLElement | null>(null)
 const constituentMode = ref(false)
+/** 触屏批注：开启后点词加入批注缓冲，无需 Ctrl/⌘（与划成分互斥） */
+const notePickMode = ref(false)
 const highlights = ref<HighlightRange[]>([])
 const annotations = ref<LocalAnnotation[]>([])
 const noteWordsBuffer = ref<string[]>([])
@@ -109,7 +111,7 @@ function getSelectionOffsets(container: HTMLElement): { start: number; end: numb
   return { start, end }
 }
 
-function onConstituentMouseUp() {
+function commitConstituentSelection() {
   if (!constituentMode.value || !sentence.value) return
   const el = sentenceInteractRef.value
   if (!el) return
@@ -121,6 +123,17 @@ function onConstituentMouseUp() {
   if (end <= start) return
   highlights.value.push({ id: randomId(), start, end })
   selRemove()
+}
+
+/**
+ * 桌面用 mouseup；触屏上选区往往在 pointerup 之后才落盘，延后一帧再读 Selection。
+ */
+function onConstituentPointerUp() {
+  if (!constituentMode.value || !sentence.value) return
+  const run = () => commitConstituentSelection()
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(run)
+  })
 }
 
 function selRemove() {
@@ -175,8 +188,16 @@ function resetLocalAnnotationState() {
   annotations.value = []
   noteWordsBuffer.value = []
   constituentMode.value = false
+  notePickMode.value = false
   selRemove()
 }
+
+watch(constituentMode, (on: boolean) => {
+  if (on) notePickMode.value = false
+})
+watch(notePickMode, (on: boolean) => {
+  if (on) constituentMode.value = false
+})
 
 watch(
   () => sentence.value?.id,
@@ -236,6 +257,11 @@ async function handleWordClick(word: string, e?: MouseEvent) {
   const cleanWord = word.replace(/[.,!?;:]/g, '').trim().toLowerCase()
   if (!cleanWord) return
   if (constituentMode.value) return
+  if (notePickMode.value) {
+    e?.preventDefault()
+    toggleNoteWord(cleanWord)
+    return
+  }
   if (e && (e.ctrlKey || e.metaKey)) {
     e.preventDefault()
     toggleNoteWord(cleanWord)
@@ -407,6 +433,23 @@ function goToSummary() {
             清除划分
           </button>
           <button
+            v-if="constituentMode"
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10"
+            @click="commitConstituentSelection"
+          >
+            应用当前选中
+          </button>
+          <button
+            v-if="!constituentMode"
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
+            :class="notePickMode ? 'border-primary text-primary bg-primary/5' : ''"
+            @click="notePickMode = !notePickMode"
+          >
+            {{ notePickMode ? '退出批注选词' : '批注选词' }}
+          </button>
+          <button
             type="button"
             class="text-xs px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10 disabled:opacity-40 disabled:pointer-events-none"
             :disabled="noteWordsBuffer.length === 0"
@@ -416,11 +459,14 @@ function goToSummary() {
           </button>
         </div>
         <p v-if="constituentMode" class="text-xs text-muted-foreground -mt-2">
-          在句子上拖拽选中英文，松开后标成浅红；此模式下不可点词查义。
+          在句子上长按并拖选英文，松手后应标成浅红；若未生效可再点「应用当前选中」。此模式下不可点词查义。
+        </p>
+        <p v-else-if="notePickMode" class="text-xs text-muted-foreground -mt-2">
+          直接点词可加入/取消批注候选（可多词），选好后点「添加批注」；再点「退出批注选词」恢复点词查义。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
-          点词查义、加入生词本；按住 <kbd class="px-1 rounded bg-secondary text-[10px]">Ctrl</kbd> /
-          <kbd class="px-1 rounded bg-secondary text-[10px]">⌘</kbd> 点词可多选，再点「添加批注」。触屏上若划选不便，可仅用键盘多选。
+          点词查义、加入生词本；电脑可按住 <kbd class="px-1 rounded bg-secondary text-[10px]">Ctrl</kbd> /
+          <kbd class="px-1 rounded bg-secondary text-[10px]">⌘</kbd> 多选后「添加批注」。手机请开「批注选词」再点词。
         </p>
 
         <!-- 难度和来源 -->
@@ -440,9 +486,9 @@ function goToSummary() {
             ref="sentenceInteractRef"
             class="text-foreground leading-relaxed text-lg"
             :class="constituentMode ? 'select-text cursor-text' : ''"
-            @mouseup="onConstituentMouseUp"
+            @pointerup="onConstituentPointerUp"
           >
-            <template v-if="feedback && !constituentMode">
+            <template v-if="!constituentMode">
               <template v-for="(p, index) in interactivePieces" :key="index">
                 <span v-if="p.kind === 'space'" class="whitespace-pre select-none">{{ p.text }}</span>
                 <span
@@ -474,7 +520,7 @@ function goToSummary() {
           </p>
           
           <!-- 生词选择提示 -->
-          <p v-if="feedback && selectedWords.length > 0" class="text-xs text-muted-foreground mt-3">
+          <p v-if="selectedWords.length > 0" class="text-xs text-muted-foreground mt-3">
             已选择 {{ selectedWords.length }} 个生词
             <button 
               @click="addSelectedWordsToVocabulary"
