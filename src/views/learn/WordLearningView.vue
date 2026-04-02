@@ -12,6 +12,8 @@ const learningStore = useLearningStore()
 
 const showMeaning = ref(false)
 const isTransitioning = ref(false)
+/** 避免首屏未请求完时把「空列表」当成「已学完」 */
+const listLoadState = ref<'pending' | 'loading' | 'done'>('pending')
 
 // 学习类型: new 新词 / review 复习
 const learningType = computed(() => (route.query.type as 'new' | 'review') || 'new')
@@ -21,7 +23,7 @@ const progress = computed(() => learningStore.wordsProgress)
 const currentIndex = computed(() => learningStore.currentWordIndex)
 const totalWords = computed(() => learningStore.currentWords.length)
 const hasNextWord = computed(() => learningStore.hasNextWord)
-const isLoading = computed(() => learningStore.loading)
+const listReady = computed(() => listLoadState.value === 'done')
 
 onMounted(() => {
   loadWords()
@@ -32,8 +34,13 @@ watch(() => route.query.type, () => {
 })
 
 async function loadWords() {
+  listLoadState.value = 'loading'
   showMeaning.value = false
-  await learningStore.loadTodayWords(learningType.value)
+  try {
+    await learningStore.loadTodayWords(learningType.value)
+  } finally {
+    listLoadState.value = 'done'
+  }
 }
 
 function revealMeaning() {
@@ -46,7 +53,7 @@ async function handleMastery(mastery: WordMastery) {
   isTransitioning.value = true
   
   // 提交掌握程度
-  await learningStore.markWordMastery(currentWord.value.id, mastery)
+  await learningStore.markWordMastery(currentWord.value, mastery)
   
   // 如果还有下一个单词，继续
   if (hasNextWord.value) {
@@ -79,11 +86,11 @@ function exitLearning() {
 
 <template>
   <div class="flex flex-col min-h-screen bg-background">
-    <!-- 进度条 -->
-    <div class="px-4 pt-4">
+    <!-- 进度条（数据就绪后再显示，避免 1/0） -->
+    <div v-if="listReady" class="px-4 pt-4">
       <div class="flex items-center justify-between text-sm text-muted-foreground mb-2">
         <span>{{ learningType === 'new' ? '新词学习' : '单词复习' }}</span>
-        <span>{{ currentIndex + 1 }} / {{ totalWords }}</span>
+        <span>{{ totalWords > 0 ? `${currentIndex + 1} / ${totalWords}` : '0 / 0' }}</span>
       </div>
       <div class="h-1.5 bg-secondary rounded-full overflow-hidden">
         <div 
@@ -95,10 +102,16 @@ function exitLearning() {
     
     <!-- 主内容区域 -->
     <div class="flex-1 flex flex-col justify-center px-6 py-8">
-      <!-- 加载状态 -->
-      <div v-if="isLoading" class="text-center">
+      <!-- 加载状态：首屏 pending、请求中、或列表尚未标记为 done -->
+      <div v-if="!listReady" class="text-center">
         <div class="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
         <p class="text-muted-foreground">加载中...</p>
+      </div>
+      
+      <!-- 加载失败 -->
+      <div v-else-if="learningStore.error && !currentWord" class="text-center">
+        <p class="text-sm text-destructive mb-4">{{ learningStore.error }}</p>
+        <AppButton @click="loadWords">重试</AppButton>
       </div>
       
       <!-- 无单词状态 -->

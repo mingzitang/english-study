@@ -39,8 +39,13 @@ export { learningApi } from './learning'
  * 4. user_word_progress 表
  *    - id: uuid (primary key)
  *    - user_id: uuid (foreign key -> users)
- *    - word_id: uuid (foreign key -> words)
+ *    - word_id: uuid (foreign key -> words，可与 custom_word_id 二选一)
+ *    - custom_word_id: uuid? (foreign key -> user_custom_words，私有词进度)
  *    - mastery: enum('known', 'fuzzy', 'unknown')
+ *    - srs_step: integer (0–4，SRS 阶段；认识递增，模糊/不认识归零)
+ *    - last_rating: text? (最近一次按钮：known/fuzzy/unknown)
+ *    - last_rating_at: timestamptz? (用于「昨日不认识/模糊」复习队列)
+ *    - last_study_mode: text? (new | review，首页今日进度仅统计在学习页点击过掌握按钮的记录)
  *    - review_count: integer (default: 0)
  *    - next_review_date: date
  *    - last_review_date: date?
@@ -49,6 +54,7 @@ export { learningApi } from './learning'
  *    - source_id: uuid?
  *    - created_at: timestamp
  *    - updated_at: timestamp
+ *    （见 sql/word_review_srs.sql：部分唯一索引 user_id+word_id / user_id+custom_word_id）
  * 
  * 5. sentences 表
  *    - id: uuid (primary key)

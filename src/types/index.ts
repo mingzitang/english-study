@@ -38,6 +38,11 @@ export interface AuthResponse {
 
 export type WordMastery = 'known' | 'fuzzy' | 'unknown'  // 认识 / 模糊 / 不认识
 
+/** 写入 user_word_progress 时用：词库词用 words.id；仅生词本私有词用 user_custom_words.id */
+export type WordProgressKey =
+  | { kind: 'library'; wordId: string }
+  | { kind: 'custom'; customWordId: string }
+
 export interface Word {
   id: string
   word: string
@@ -47,6 +52,10 @@ export interface Word {
   source: 'library' | 'sentence' | 'manual'  // 来源：词库/长难句/手动添加
   sourceId?: string           // 来源ID（如来自哪个长难句）
   createdAt: string
+  /** 与 Supabase 进度行对应；缺省时按 id 当作词库 word_id（兼容旧逻辑） */
+  progressKey?: WordProgressKey
+  /** 本次列表来自新词学习还是复习（用于本地今日计划计数） */
+  learningMode?: 'new' | 'review'
 }
 
 export interface WordMeaning {

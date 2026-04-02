@@ -31,9 +31,21 @@ const lookupMessage = ref('')
 const sentence = computed(() => learningStore.todaySentence)
 const feedback = computed(() => learningStore.sentenceAIFeedback)
 const isLoading = computed(() => learningStore.loading)
+/** 避免首屏未加载完时把「无句子」当成「已完成」 */
+const sentenceLoadState = ref<'pending' | 'loading' | 'done'>('pending')
+const sentenceReady = computed(() => sentenceLoadState.value === 'done')
+
+async function loadSentence() {
+  sentenceLoadState.value = 'loading'
+  try {
+    await learningStore.loadTodaySentence()
+  } finally {
+    sentenceLoadState.value = 'done'
+  }
+}
 
 onMounted(() => {
-  learningStore.loadTodaySentence()
+  loadSentence()
 })
 
 async function submitTranslation() {
@@ -167,9 +179,9 @@ function splitSentence(text: string) {
   <div class="flex flex-col min-h-screen bg-background">
     <!-- 主内容 -->
     <div class="flex-1 overflow-auto">
-      <!-- 加载状态 -->
-      <div v-if="isLoading && !sentence" class="flex items-center justify-center h-64">
-        <div class="text-center">
+      <!-- 加载状态（与 store.loading 解耦，避免首屏 isLoading 仍为 false 时误展示「已完成」） -->
+      <div v-if="!sentenceReady" class="flex items-center justify-center min-h-[50vh]">
+        <div class="text-center px-4">
           <div class="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p class="text-muted-foreground">加载中...</p>
         </div>
@@ -378,8 +390,16 @@ function splitSentence(text: string) {
         </div>
       </div>
       
-      <!-- 无句子状态 -->
-      <div v-else class="flex items-center justify-center h-64">
+      <!-- 加载失败 -->
+      <div v-else-if="learningStore.error" class="flex items-center justify-center min-h-[50vh] px-4">
+        <div class="text-center max-w-sm">
+          <p class="text-sm text-destructive mb-4">{{ learningStore.error }}</p>
+          <AppButton @click="loadSentence">重试</AppButton>
+        </div>
+      </div>
+      
+      <!-- 无句子（已学完或暂无分配） -->
+      <div v-else class="flex items-center justify-center min-h-[50vh] px-4">
         <div class="text-center">
           <div class="w-16 h-16 rounded-full bg-accent/10 flex items-center justify-center mx-auto mb-4">
             <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-accent">

@@ -1,5 +1,6 @@
 import type {
   Word,
+  WordProgressKey,
   Sentence,
   DailyPlan,
   LearningStats,
@@ -127,28 +128,128 @@ function mapSentenceRow(row: SentenceRow): Sentence {
   }
 }
 
-function getTodayBounds() {
-  const today = new Date()
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate())
-  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1)
-
-  return {
-    date: start.toISOString().slice(0, 10),
-    startISO: start.toISOString(),
-    endISO: end.toISOString()
+/**
+ * 学习日：北京时间当日 05:00 至次日 05:00（与长难句日切一致）
+ */
+function getBeijingLearningDayBounds(now: Date = new Date()): {
+  date: string
+  startISO: string
+  endISO: string
+} {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  })
+  const parts = fmt.formatToParts(now)
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '0'
+  let y = parseInt(get('year'), 10)
+  let m = parseInt(get('month'), 10)
+  let d = parseInt(get('day'), 10)
+  const hour = parseInt(get('hour'), 10)
+  if (Number.isNaN(hour) || hour < 5) {
+    const t = new Date(Date.UTC(y, m - 1, d))
+    t.setUTCDate(t.getUTCDate() - 1)
+    y = t.getUTCFullYear()
+    m = t.getUTCMonth() + 1
+    d = t.getUTCDate()
   }
+  const date = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  const startISO = new Date(`${date}T05:00:00+08:00`).toISOString()
+  const end = new Date(new Date(`${date}T05:00:00+08:00`).getTime() + 24 * 60 * 60 * 1000)
+  const endISO = end.toISOString()
+  return { date, startISO, endISO }
+}
+
+/** 上一完整学习日 [昨日 05:00 北京, 今日 05:00 北京) 的 UTC 区间，用于「昨日不认识/模糊」 */
+function getBeijingPreviousLearningDayWindow(now: Date = new Date()): { startISO: string; endISO: string } {
+  const b = getBeijingLearningDayBounds(now)
+  const endISO = b.startISO
+  const startISO = new Date(new Date(endISO).getTime() - 24 * 60 * 60 * 1000).toISOString()
+  return { startISO, endISO }
 }
 
 /** 某条 user_sentence_progress 是否算「今日已完成」（与分配句对齐时使用） */
 function isSentenceProgressDoneToday(
   progress: { last_attempt_date: string | null; updated_at: string } | null,
-  bounds: ReturnType<typeof getTodayBounds>
+  bounds: ReturnType<typeof getBeijingLearningDayBounds>
 ): boolean {
   if (!progress) return false
   const { date, startISO, endISO } = bounds
   if (progress.last_attempt_date === date) return true
   if (progress.updated_at >= startISO && progress.updated_at < endISO) return true
   return false
+}
+
+function addCalendarDays(isoDate: string, days: number): string {
+  const d = new Date(isoDate + 'T12:00:00.000Z')
+  d.setUTCDate(d.getUTCDate() + days)
+  return d.toISOString().slice(0, 10)
+}
+
+/** 当前 srs_step 下点击「认识」后，间隔多少天再复习 */
+function daysAfterKnownMark(prevStep: number): number {
+  switch (prevStep) {
+    case 0:
+      return 1
+    case 1:
+      return 2
+    case 2:
+      return 7
+    case 3:
+      return 15
+    default:
+      return 15
+  }
+}
+
+function nextStepAfterKnown(prevStep: number): number {
+  return Math.min(prevStep + 1, 4)
+}
+
+function wordProgressKeyString(w: Word): string {
+  if (w.progressKey?.kind === 'library') return `l:${w.progressKey.wordId}`
+  if (w.progressKey?.kind === 'custom') return `c:${w.progressKey.customWordId}`
+  return `id:${w.id}`
+}
+
+function vocabularyItemToReviewWord(item: VocabularyBookItem): Word | null {
+  if (item.wordId) {
+    return {
+      ...item.word,
+      id: item.wordId,
+      progressKey: { kind: 'library', wordId: item.wordId },
+      learningMode: 'review'
+    }
+  }
+  if (item.source === 'manual' && item.sourceId) {
+    return {
+      ...item.word,
+      id: `custom-${item.sourceId}`,
+      progressKey: { kind: 'custom', customWordId: item.sourceId },
+      learningMode: 'review'
+    }
+  }
+  return null
+}
+
+type ProgressRow = {
+  word_id: string | null
+  custom_word_id: string | null
+  next_review_date: string | null
+  last_rating: string | null
+  last_rating_at: string | null
+  srs_step: number | null
+}
+
+function isReviewDue(row: ProgressRow | undefined | null, todayDate: string): boolean {
+  if (!row) return true
+  if (!row.next_review_date) return true
+  return row.next_review_date <= todayDate
 }
 
 /**
@@ -209,6 +310,224 @@ function toAIFeedback(raw: unknown): AIFeedback | null {
     shouldAddToErrorBook: maybe.shouldAddToErrorBook,
     score: maybe.score
   }
+}
+
+async function wordFromProgressRow(
+  supabase: ReturnType<typeof getSupabase>,
+  examType: 'english1' | 'english2',
+  row: ProgressRow
+): Promise<Word | null> {
+  if (row.word_id) {
+    const { data, error } = await supabase
+      .from('words')
+      .select('id,word,phonetic,meanings,examples,created_at,exam_type')
+      .eq('id', row.word_id)
+      .maybeSingle()
+    if (error || !data) return null
+    const wr = data as WordRow & { exam_type?: string }
+    const et = wr.exam_type
+    if (et && et !== examType && et !== 'both') return null
+    return {
+      ...mapWordRow(wr, 'library'),
+      progressKey: { kind: 'library', wordId: row.word_id },
+      learningMode: 'review'
+    }
+  }
+  if (row.custom_word_id) {
+    const { data, error } = await supabase
+      .from('user_custom_words')
+      .select('id,user_id,word,phonetic,meanings,examples,exam_type,created_at,updated_at')
+      .eq('id', row.custom_word_id)
+      .maybeSingle()
+    if (error || !data) return null
+    const cw = data as UserCustomWordRow
+    if (cw.exam_type !== examType && cw.exam_type !== 'both') return null
+    return {
+      id: `custom-${cw.id}`,
+      word: cw.word,
+      phonetic: cw.phonetic || undefined,
+      meanings: normalizeMeanings(cw.meanings),
+      examples: Array.isArray(cw.examples) ? (cw.examples as string[]) : [],
+      source: 'manual',
+      createdAt: cw.created_at,
+      progressKey: { kind: 'custom', customWordId: cw.id },
+      learningMode: 'review'
+    }
+  }
+  return null
+}
+
+function progressRowForWord(w: Word, m: Map<string, ProgressRow>): ProgressRow | undefined {
+  if (w.progressKey?.kind === 'library') return m.get(`l:${w.progressKey.wordId}`)
+  if (w.progressKey?.kind === 'custom') return m.get(`c:${w.progressKey.customWordId}`)
+  return undefined
+}
+
+async function computeReviewCandidates(
+  userId: string,
+  examType: 'english1' | 'english2',
+  getVocabularyItems: () => Promise<VocabularyBookItem[]>
+): Promise<Word[]> {
+  const supabase = getSupabase()
+  const bj = getBeijingLearningDayBounds()
+  const todayDate = bj.date
+  const prevWindow = getBeijingPreviousLearningDayWindow()
+
+  const vocabItems = await getVocabularyItems()
+  const candVocab: VocabularyBookItem[] = []
+  const libIds = new Set<string>()
+  const custIds = new Set<string>()
+  for (const item of vocabItems) {
+    if (item.wordId) libIds.add(item.wordId)
+    else if (item.source === 'manual' && item.sourceId) custIds.add(item.sourceId)
+  }
+
+  let libExamOk = new Set<string>()
+  if (libIds.size > 0) {
+    const { data: examLib } = await supabase
+      .from('words')
+      .select('id,exam_type')
+      .in('id', [...libIds])
+    for (const r of examLib ?? []) {
+      const row = r as { id: string; exam_type: string }
+      if (row.exam_type === examType || row.exam_type === 'both') libExamOk.add(row.id)
+    }
+  }
+  let custExamOk = new Set<string>()
+  if (custIds.size > 0) {
+    const { data: examCust } = await supabase
+      .from('user_custom_words')
+      .select('id,exam_type')
+      .in('id', [...custIds])
+    for (const r of examCust ?? []) {
+      const row = r as { id: string; exam_type: string }
+      if (row.exam_type === examType || row.exam_type === 'both') custExamOk.add(row.id)
+    }
+  }
+
+  for (const item of vocabItems) {
+    if (item.wordId) {
+      if (libExamOk.has(item.wordId)) candVocab.push(item)
+    } else if (item.source === 'manual' && item.sourceId) {
+      if (custExamOk.has(item.sourceId)) candVocab.push(item)
+    }
+  }
+
+  const vocabWords: Word[] = []
+  for (const item of candVocab) {
+    const w = vocabularyItemToReviewWord(item)
+    if (w) vocabWords.push(w)
+  }
+
+  const vocabLibIds = [...new Set(vocabWords.filter(v => v.progressKey?.kind === 'library').map(v => (v.progressKey as Extract<WordProgressKey, { kind: 'library' }>).wordId))]
+  const vocabCustIds = [...new Set(vocabWords.filter(v => v.progressKey?.kind === 'custom').map(v => (v.progressKey as Extract<WordProgressKey, { kind: 'custom' }>).customWordId))]
+
+  const progressByKey = new Map<string, ProgressRow>()
+  if (vocabLibIds.length > 0) {
+    const { data: pl } = await supabase
+      .from('user_word_progress')
+      .select('word_id,custom_word_id,next_review_date,last_rating,last_rating_at,srs_step')
+      .eq('user_id', userId)
+      .in('word_id', vocabLibIds)
+    for (const p of pl ?? []) {
+      const row = p as ProgressRow
+      if (row.word_id) progressByKey.set(`l:${row.word_id}`, row)
+    }
+  }
+  if (vocabCustIds.length > 0) {
+    const { data: pc } = await supabase
+      .from('user_word_progress')
+      .select('word_id,custom_word_id,next_review_date,last_rating,last_rating_at,srs_step')
+      .eq('user_id', userId)
+      .in('custom_word_id', vocabCustIds)
+    for (const p of pc ?? []) {
+      const row = p as ProgressRow
+      if (row.custom_word_id) progressByKey.set(`c:${row.custom_word_id}`, row)
+    }
+  }
+
+  const { data: yesterdayRows } = await supabase
+    .from('user_word_progress')
+    .select('word_id,custom_word_id,next_review_date,last_rating,last_rating_at,srs_step')
+    .eq('user_id', userId)
+    .gte('last_rating_at', prevWindow.startISO)
+    .lt('last_rating_at', prevWindow.endISO)
+    .in('last_rating', ['unknown', 'fuzzy'])
+
+  const yesterdayKeys = new Set<string>()
+  const yesterdayWords: Word[] = []
+  for (const raw of yesterdayRows ?? []) {
+    const row = raw as ProgressRow
+    if (row.word_id) progressByKey.set(`l:${row.word_id}`, row)
+    if (row.custom_word_id) progressByKey.set(`c:${row.custom_word_id}`, row)
+    const w = await wordFromProgressRow(supabase, examType, row)
+    if (w) {
+      yesterdayKeys.add(wordProgressKeyString(w))
+      yesterdayWords.push(w)
+    }
+  }
+
+  const vocabDue: Word[] = []
+  for (const w of vocabWords) {
+    const row = progressRowForWord(w, progressByKey)
+    if (isReviewDue(row, todayDate)) vocabDue.push(w)
+  }
+
+  const merged = new Map<string, Word>()
+  for (const w of yesterdayWords) merged.set(wordProgressKeyString(w), w)
+  for (const w of vocabDue) {
+    const k = wordProgressKeyString(w)
+    if (!merged.has(k)) merged.set(k, w)
+  }
+
+  const list = [...merged.values()]
+  list.sort((a, b) => {
+    const ay = yesterdayKeys.has(wordProgressKeyString(a)) ? 0 : 1
+    const by = yesterdayKeys.has(wordProgressKeyString(b)) ? 0 : 1
+    if (ay !== by) return ay - by
+    const pa = progressRowForWord(a, progressByKey)?.next_review_date || '9999-12-31'
+    const pb = progressRowForWord(b, progressByKey)?.next_review_date || '9999-12-31'
+    return pa.localeCompare(pb)
+  })
+
+  return list
+}
+
+async function buildReviewWords(
+  userId: string,
+  examType: 'english1' | 'english2',
+  getVocabularyItems: () => Promise<VocabularyBookItem[]>,
+  limit: number
+): Promise<Word[]> {
+  const list = await computeReviewCandidates(userId, examType, getVocabularyItems)
+  return list.slice(0, limit)
+}
+
+/** 词库中尚无学习进度的词数量（与 getTodayWords('new') 口径一致，用于首页动态目标上限） */
+async function countNewWordsAvailable(
+  userId: string,
+  examType: 'english1' | 'english2',
+  supabase: ReturnType<typeof getSupabase>
+): Promise<number> {
+  const { data: words, error: wordsError } = await supabase
+    .from('words')
+    .select('id')
+    .in('exam_type', [examType, 'both'])
+    .limit(300)
+  if (wordsError) throw new Error(wordsError.message)
+  const wordRows = (words ?? []) as { id: string }[]
+  const wordIds = wordRows.map(w => w.id)
+  if (wordIds.length === 0) return 0
+
+  const { data: progressRows, error: progressError } = await supabase
+    .from('user_word_progress')
+    .select('word_id')
+    .eq('user_id', userId)
+    .in('word_id', wordIds)
+  if (progressError) throw new Error(progressError.message)
+
+  const progressSet = new Set((progressRows ?? []).map((p: { word_id: string }) => p.word_id))
+  return wordRows.filter(w => !progressSet.has(w.id)).length
 }
 
 export const learningApi = {
@@ -275,6 +594,10 @@ export const learningApi = {
 
     const limit = type === 'new' ? (settings?.daily_new_words ?? 10) : (settings?.daily_review_words ?? 20)
 
+    if (type === 'review') {
+      return buildReviewWords(userId, examType, () => learningApi.getVocabularyItems(), limit)
+    }
+
     const { data: words, error: wordsError } = await supabase
       .from('words')
       .select('id,word,phonetic,meanings,examples,created_at')
@@ -293,49 +616,88 @@ export const learningApi = {
       .in('word_id', wordIds)
     if (progressError) throw new Error(progressError.message)
 
-    const progressMap = new Map((progressRows ?? []).map((p: { word_id: string; next_review_date: string | null }) => [p.word_id, p]))
-
-    if (type === 'new') {
-      return wordRows
-        .filter(w => !progressMap.has(w.id))
-        .slice(0, limit)
-        .map(w => mapWordRow(w, 'library'))
-    }
+    const progressMap = new Map(
+      (progressRows ?? []).map((p: { word_id: string; next_review_date: string | null }) => [p.word_id, p])
+    )
 
     return wordRows
-      .filter(w => progressMap.has(w.id))
-      .sort((a, b) => {
-        const pa = progressMap.get(a.id)
-        const pb = progressMap.get(b.id)
-        const da = pa?.next_review_date ? new Date(pa.next_review_date).getTime() : 0
-        const db = pb?.next_review_date ? new Date(pb.next_review_date).getTime() : 0
-        return da - db
-      })
+      .filter(w => !progressMap.has(w.id))
       .slice(0, limit)
-      .map(w => mapWordRow(w, 'library'))
+      .map(w => ({
+        ...mapWordRow(w, 'library'),
+        progressKey: { kind: 'library', wordId: w.id } as const,
+        learningMode: 'new' as const
+      }))
   },
 
-  async updateWordMastery(wordId: string, mastery: WordMastery): Promise<void> {
+  async updateWordMastery(word: Word, mastery: WordMastery): Promise<void> {
     const userId = await getCurrentUserId()
-    const days = mastery === 'known' ? 7 : mastery === 'fuzzy' ? 2 : 1
-    const nextReviewDate = new Date()
-    nextReviewDate.setDate(nextReviewDate.getDate() + days)
+    const supabase = getSupabase()
+    const key: WordProgressKey = word.progressKey ?? { kind: 'library', wordId: word.id }
+    const today = new Date().toISOString().slice(0, 10)
+    const now = new Date().toISOString()
 
-    const { error } = await getSupabase().from('user_word_progress').upsert(
-      {
-        user_id: userId,
-        word_id: wordId,
-        mastery,
-        review_count: 1,
-        next_review_date: nextReviewDate.toISOString().slice(0, 10),
-        last_review_date: new Date().toISOString().slice(0, 10),
-        is_new: false,
-        source: 'library',
-        updated_at: new Date().toISOString()
-      },
-      { onConflict: 'user_id,word_id' }
-    )
-    if (error) throw new Error(error.message)
+    let q = supabase.from('user_word_progress').select('srs_step,review_count,source_id').eq('user_id', userId)
+    if (key.kind === 'library') {
+      q = q.eq('word_id', key.wordId).is('custom_word_id', null)
+    } else {
+      q = q.eq('custom_word_id', key.customWordId).is('word_id', null)
+    }
+    const { data: existing } = await q.maybeSingle()
+    const prevStep = (existing as { srs_step?: number } | null)?.srs_step ?? 0
+    const prevCount = (existing as { review_count?: number } | null)?.review_count ?? 0
+    const existingSourceId = (existing as { source_id?: string | null } | null)?.source_id ?? null
+
+    let nextStep = prevStep
+    let nextReview: string
+    if (mastery === 'known') {
+      nextReview = addCalendarDays(today, daysAfterKnownMark(prevStep))
+      nextStep = nextStepAfterKnown(prevStep)
+    } else {
+      nextStep = 0
+      nextReview = addCalendarDays(today, 1)
+    }
+
+    const studyMode = word.learningMode === 'review' ? 'review' : 'new'
+
+    const basePayload = {
+      user_id: userId,
+      mastery,
+      review_count: prevCount + 1,
+      next_review_date: nextReview,
+      last_review_date: today,
+      last_rating: mastery,
+      last_rating_at: now,
+      last_study_mode: studyMode,
+      srs_step: nextStep,
+      is_new: false,
+      updated_at: now
+    }
+
+    if (key.kind === 'library') {
+      const { error } = await supabase.from('user_word_progress').upsert(
+        {
+          ...basePayload,
+          word_id: key.wordId,
+          custom_word_id: null,
+          source: 'library',
+          source_id: existingSourceId
+        },
+        { onConflict: 'user_id,word_id' }
+      )
+      if (error) throw new Error(error.message)
+    } else {
+      const { error } = await supabase.from('user_word_progress').upsert(
+        {
+          ...basePayload,
+          word_id: null,
+          custom_word_id: key.customWordId,
+          source: 'manual'
+        },
+        { onConflict: 'user_id,custom_word_id' }
+      )
+      if (error) throw new Error(error.message)
+    }
   },
 
   async addWordFromSentence(word: string, sentenceId?: string, customInput?: CustomWordInput): Promise<AddWordResult> {
@@ -423,6 +785,21 @@ export const learningApi = {
       })
       if (insertVocabCustomError && insertVocabCustomError.code !== '23505') throw new Error(insertVocabCustomError.message)
 
+      await supabase.from('user_word_progress').upsert(
+        {
+          user_id: userId,
+          word_id: null,
+          custom_word_id: customId,
+          mastery: 'unknown',
+          srs_step: 0,
+          review_count: 0,
+          is_new: true,
+          source: 'manual',
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'user_id,custom_word_id' }
+      )
+
       return { status: 'added', word: normalizedWord, message: '已添加到生词本' }
     }
 
@@ -442,6 +819,7 @@ export const learningApi = {
           user_id: userId,
           word_id: libraryWord.id,
           mastery: 'unknown',
+          srs_step: 0,
           review_count: 0,
           is_new: true,
           source,
@@ -481,6 +859,22 @@ export const learningApi = {
       mastery: 'unknown'
     })
     if (insertVocabCustomError && insertVocabCustomError.code !== '23505') throw new Error(insertVocabCustomError.message)
+
+    await supabase.from('user_word_progress').upsert(
+      {
+        user_id: userId,
+        word_id: null,
+        custom_word_id: customWord!.id,
+        mastery: 'unknown',
+        srs_step: 0,
+        review_count: 0,
+        is_new: true,
+        source: 'manual',
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: 'user_id,custom_word_id' }
+    )
+
     return { status: 'added', word: normalizedWord, message: '已添加到生词本' }
   },
 
@@ -507,7 +901,7 @@ export const learningApi = {
     const userId = await getCurrentUserId()
     const examType = await getExamType(userId)
     const supabase = getSupabase()
-    const bounds = getTodayBounds()
+    const bounds = getBeijingLearningDayBounds()
 
     const assignedSentenceId = await getOrCreateAssignedSentenceId(userId, examType, supabase)
 
@@ -577,7 +971,7 @@ export const learningApi = {
         is_correct: score >= 70,
         attempt_count: 1,
         in_error_book: score < 70,
-        last_attempt_date: new Date().toISOString().slice(0, 10),
+        last_attempt_date: getBeijingLearningDayBounds().date,
         updated_at: new Date().toISOString()
       },
       { onConflict: 'user_id,sentence_id' }
@@ -638,7 +1032,7 @@ export const learningApi = {
     const userId = await getCurrentUserId()
     const examType = await getExamType(userId)
     const supabase = getSupabase()
-    const bounds = getTodayBounds()
+    const bounds = getBeijingLearningDayBounds()
     const { date, startISO, endISO } = bounds
 
     const assignedSentenceId = await getOrCreateAssignedSentenceId(userId, examType, supabase)
@@ -657,20 +1051,33 @@ export const learningApi = {
       .eq('user_id', userId)
       .maybeSingle()
 
-    const { data: todayWords } = await supabase
-      .from('user_word_progress')
-      .select('is_new')
-      .eq('user_id', userId)
-      .gte('updated_at', startISO)
-      .lt('updated_at', endISO)
+    const newWordsCap = settings?.daily_new_words ?? 40
+    const reviewCap = settings?.daily_review_words ?? 60
 
-    const newWordsCompleted = (todayWords ?? []).filter((x: { is_new: boolean }) => x.is_new === false).length
-    const reviewWordsCompleted = Math.max(0, (todayWords ?? []).length - newWordsCompleted)
+    const dueReviewList = await computeReviewCandidates(userId, examType, () => learningApi.getVocabularyItems())
+    const reviewWordsTarget = Math.min(reviewCap, dueReviewList.length)
+
+    const availableNewCount = await countNewWordsAvailable(userId, examType, supabase)
+    const newWordsTarget = Math.min(newWordsCap, availableNewCount)
+
+    const { data: ratedToday } = await supabase
+      .from('user_word_progress')
+      .select('last_study_mode')
+      .eq('user_id', userId)
+      .gte('last_rating_at', startISO)
+      .lt('last_rating_at', endISO)
+
+    const newWordsCompleted = (ratedToday ?? []).filter(
+      (x: { last_study_mode: string | null }) => x.last_study_mode === 'new'
+    ).length
+    const reviewWordsCompleted = (ratedToday ?? []).filter(
+      (x: { last_study_mode: string | null }) => x.last_study_mode === 'review'
+    ).length
 
     return {
       date,
-      newWordsTarget: settings?.daily_new_words ?? 40,
-      reviewWordsTarget: settings?.daily_review_words ?? 60,
+      newWordsTarget,
+      reviewWordsTarget,
       newWordsCompleted,
       reviewWordsCompleted,
       sentenceCompleted,
@@ -681,7 +1088,7 @@ export const learningApi = {
   async getStats(): Promise<LearningStats> {
     const userId = await getCurrentUserId()
     const supabase = getSupabase()
-    const { date: todayDate } = getTodayBounds()
+    const { date: todayDate } = getBeijingLearningDayBounds()
 
     const { count: totalWordsLearned } = await supabase
       .from('user_word_progress')
@@ -905,7 +1312,7 @@ export const learningApi = {
   async checkIn(): Promise<void> {
     const userId = await getCurrentUserId()
     const examType = await getExamType(userId)
-    const bounds = getTodayBounds()
+    const bounds = getBeijingLearningDayBounds()
     const { date, startISO, endISO } = bounds
     const supabase = getSupabase()
 
@@ -919,18 +1326,32 @@ export const learningApi = {
 
     const sentenceCompleted = isSentenceProgressDoneToday(sentenceProgressForAssigned, bounds)
 
-    const { data: todayWords } = await supabase
-      .from('user_word_progress')
-      .select('is_new')
-      .eq('user_id', userId)
-      .gte('updated_at', startISO)
-      .lt('updated_at', endISO)
-
     const { data: settings } = await supabase
       .from('user_settings')
       .select('daily_new_words,daily_review_words')
       .eq('user_id', userId)
       .maybeSingle()
+
+    const newWordsCap = settings?.daily_new_words ?? 40
+    const reviewCap = settings?.daily_review_words ?? 60
+    const dueReviewList = await computeReviewCandidates(userId, examType, () => learningApi.getVocabularyItems())
+    const reviewTarget = Math.min(reviewCap, dueReviewList.length)
+    const availableNewCount = await countNewWordsAvailable(userId, examType, supabase)
+    const newTarget = Math.min(newWordsCap, availableNewCount)
+
+    const { data: ratedToday } = await supabase
+      .from('user_word_progress')
+      .select('last_study_mode')
+      .eq('user_id', userId)
+      .gte('last_rating_at', startISO)
+      .lt('last_rating_at', endISO)
+
+    const newWordsCompleted = (ratedToday ?? []).filter(
+      (x: { last_study_mode: string | null }) => x.last_study_mode === 'new'
+    ).length
+    const reviewWordsCompleted = (ratedToday ?? []).filter(
+      (x: { last_study_mode: string | null }) => x.last_study_mode === 'review'
+    ).length
 
     const { count: errorBooksAdded } = await supabase
       .from('error_book')
@@ -939,13 +1360,8 @@ export const learningApi = {
       .gte('added_at', startISO)
       .lt('added_at', endISO)
 
-    const newWordsCompleted = (todayWords ?? []).filter((x: { is_new: boolean }) => x.is_new === false).length
-    const reviewWordsCompleted = Math.max(0, (todayWords ?? []).length - newWordsCompleted)
-
-    const newTarget = settings?.daily_new_words ?? 40
-    const reviewTarget = settings?.daily_review_words ?? 60
     const totalTarget = newTarget + reviewTarget
-    const wordRate = totalTarget > 0 ? ((newWordsCompleted + reviewWordsCompleted) / totalTarget) * 80 : 80
+    const wordRate = totalTarget > 0 ? ((newWordsCompleted + reviewWordsCompleted) / totalTarget) * 80 : 0
     const sentenceRate = sentenceCompleted ? 20 : 0
     const completionRate = Math.max(0, Math.min(100, Math.round(wordRate + sentenceRate)))
 

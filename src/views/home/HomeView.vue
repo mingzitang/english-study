@@ -86,13 +86,19 @@ function startLearning() {
         </div>
       </div>
       
-      <!-- 今日目标 -->
-      <div class="flex items-center gap-4 text-sm opacity-90 mb-4">
-        <span>预计 {{ todayPlan?.estimatedMinutes || 35 }} 分钟</span>
-        <span class="w-1 h-1 rounded-full bg-current opacity-60" />
-        <span>新词 {{ todayPlan?.newWordsTarget || 40 }}</span>
-        <span class="w-1 h-1 rounded-full bg-current opacity-60" />
-        <span>复习 {{ todayPlan?.reviewWordsTarget || 60 }}</span>
+      <!-- 今日目标：计划未返回前不展示数字，避免从默认 40/60 跳变 -->
+      <div
+        v-if="isTodayPlanLoaded && todayPlan"
+        class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm opacity-90 mb-4"
+      >
+        <span>预计 {{ todayPlan.estimatedMinutes }} 分钟</span>
+        <span class="w-1 h-1 rounded-full bg-current opacity-60 shrink-0" />
+        <span>新词 {{ todayPlan.newWordsTarget }}</span>
+        <span class="w-1 h-1 rounded-full bg-current opacity-60 shrink-0" />
+        <span>复习 {{ todayPlan.reviewWordsTarget }}</span>
+      </div>
+      <div v-else class="text-sm opacity-80 mb-4 min-h-[1.25rem]">
+        正在同步今日目标…
       </div>
       
       <AppButton 
@@ -111,15 +117,17 @@ function startLearning() {
       <div class="grid grid-cols-2 gap-3">
         <ProgressCard
           title="新词学习"
-          :current="todayPlan?.newWordsCompleted || 0"
-          :total="todayPlan?.newWordsTarget || 40"
+          :pending="!isTodayPlanLoaded"
+          :current="todayPlan?.newWordsCompleted ?? 0"
+          :total="todayPlan?.newWordsTarget ?? 0"
           unit="词"
           color="primary"
         />
         <ProgressCard
           title="复习单词"
-          :current="todayPlan?.reviewWordsCompleted || 0"
-          :total="todayPlan?.reviewWordsTarget || 60"
+          :pending="!isTodayPlanLoaded"
+          :current="todayPlan?.reviewWordsCompleted ?? 0"
+          :total="todayPlan?.reviewWordsTarget ?? 0"
           unit="词"
           color="accent"
         />
@@ -178,7 +186,7 @@ function startLearning() {
           icon="calendar"
         />
         <StatsCard
-          label="已学单词"
+          label="累计单词"
           :value="stats?.totalWordsLearned || 0"
           icon="book"
         />

@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { 
-  Word, 
-  Sentence, 
-  UserWordProgress, 
+import type {
+  Word,
+  Sentence,
+  UserWordProgress,
   DailyPlan,
   LearningStats,
   WordMastery,
@@ -48,10 +48,11 @@ export const useLearningStore = defineStore('learning', () => {
     const wordCompleted = newWordsCompleted + reviewWordsCompleted
     const sentenceWeight = 20 // 长难句占20%权重
     const wordWeight = 80
-    
-    const wordProgress = wordTotal > 0 ? (wordCompleted / wordTotal) * wordWeight : wordWeight
+
+    const wordProgress =
+      wordTotal > 0 ? (wordCompleted / wordTotal) * wordWeight : wordCompleted > 0 ? wordWeight : 0
     const sentenceProgress = sentenceCompleted ? sentenceWeight : 0
-    
+
     return Math.round(wordProgress + sentenceProgress)
   })
 
@@ -82,24 +83,23 @@ export const useLearningStore = defineStore('learning', () => {
     }
   }
 
-  async function markWordMastery(wordId: string, mastery: WordMastery) {
+  async function markWordMastery(word: Word, mastery: WordMastery) {
     try {
-      await learningApi.updateWordMastery(wordId, mastery)
-      
-      // 更新本地进度
-      const progress = wordProgress.value.get(wordId) || {
-        wordId,
+      await learningApi.updateWordMastery(word, mastery)
+
+      const isNewSession = word.learningMode !== 'review'
+      const progress = wordProgress.value.get(word.id) || {
+        wordId: word.id,
         userId: '',
         mastery,
         reviewCount: 0,
         nextReviewDate: '',
-        isNew: true
+        isNew: isNewSession
       }
       progress.mastery = mastery
       progress.reviewCount++
-      wordProgress.value.set(wordId, progress)
+      wordProgress.value.set(word.id, progress)
 
-      // 更新今日计划
       if (todayPlan.value) {
         if (progress.isNew) {
           todayPlan.value.newWordsCompleted++
