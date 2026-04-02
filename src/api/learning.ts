@@ -139,6 +139,57 @@ function getTodayBounds() {
   }
 }
 
+/** 某条 user_sentence_progress 是否算「今日已完成」（与分配句对齐时使用） */
+function isSentenceProgressDoneToday(
+  progress: { last_attempt_date: string | null; updated_at: string } | null,
+  bounds: ReturnType<typeof getTodayBounds>
+): boolean {
+  if (!progress) return false
+  const { date, startISO, endISO } = bounds
+  if (progress.last_attempt_date === date) return true
+  if (progress.updated_at >= startISO && progress.updated_at < endISO) return true
+  return false
+}
+
+/**
+ * 读取 user_sentence_daily_assignment；若无则插入首条 sentences（与 sql/daily_sentence_assignment.sql 配套）
+ */
+async function getOrCreateAssignedSentenceId(
+  userId: string,
+  examType: 'english1' | 'english2',
+  supabase: ReturnType<typeof getSupabase>
+): Promise<string> {
+  const { data: existing, error: readError } = await supabase
+    .from('user_sentence_daily_assignment')
+    .select('sentence_id')
+    .eq('user_id', userId)
+    .eq('exam_type', examType)
+    .maybeSingle()
+
+  if (readError) throw new Error(readError.message)
+  if (existing?.sentence_id) return existing.sentence_id as string
+
+  const { data: firstSentence, error: pickError } = await supabase
+    .from('sentences')
+    .select('id')
+    .eq('exam_type', examType)
+    .limit(1)
+    .maybeSingle()
+
+  if (pickError) throw new Error(pickError.message)
+  if (!firstSentence?.id) throw new Error('No sentence available')
+
+  const { error: insError } = await supabase.from('user_sentence_daily_assignment').insert({
+    user_id: userId,
+    exam_type: examType,
+    sentence_id: firstSentence.id,
+    last_refreshed_at: new Date().toISOString()
+  })
+  if (insError) throw new Error(insError.message)
+
+  return firstSentence.id as string
+}
+
 function toAIFeedback(raw: unknown): AIFeedback | null {
   if (!raw || typeof raw !== 'object') return null
   const maybe = raw as Partial<AIFeedback>
@@ -436,58 +487,64 @@ export const learningApi = {
   async getTodaySentence(): Promise<Sentence> {
     const userId = await getCurrentUserId()
     const examType = await getExamType(userId)
+    const supabase = getSupabase()
 
-    const { data, error } = await getSupabase()
+    const sentenceId = await getOrCreateAssignedSentenceId(userId, examType, supabase)
+
+    const { data, error } = await supabase
       .from('sentences')
       .select('id,content,translation,analysis,source,difficulty,exam_type,created_at')
-      .eq('exam_type', examType)
-      .limit(1)
+      .eq('id', sentenceId)
+      .single()
 
     if (error) throw new Error(error.message)
-    if (!data || data.length === 0) throw new Error('No sentence available')
+    if (!data) throw new Error('No sentence available')
 
-    return mapSentenceRow(data[0] as SentenceRow)
+    return mapSentenceRow(data as SentenceRow)
   },
 
   async getTodaySentenceState(): Promise<TodaySentenceState> {
     const userId = await getCurrentUserId()
+    const examType = await getExamType(userId)
     const supabase = getSupabase()
-    const { date, startISO, endISO } = getTodayBounds()
+    const bounds = getTodayBounds()
 
-    const { data: progressByDate } = await supabase
+    const assignedSentenceId = await getOrCreateAssignedSentenceId(userId, examType, supabase)
+
+    const { data: progress } = await supabase
       .from('user_sentence_progress')
-      .select('sentence_id,ai_feedback')
+      .select('sentence_id,ai_feedback,last_attempt_date,updated_at')
       .eq('user_id', userId)
-      .eq('last_attempt_date', date)
-      .order('updated_at', { ascending: false })
-      .limit(1)
+      .eq('sentence_id', assignedSentenceId)
+      .maybeSingle()
 
-    const { data: progressByUpdatedAt } = await supabase
-      .from('user_sentence_progress')
-      .select('sentence_id,ai_feedback')
-      .eq('user_id', userId)
-      .gte('updated_at', startISO)
-      .lt('updated_at', endISO)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-
-    const progress = (progressByDate && progressByDate[0]) || (progressByUpdatedAt && progressByUpdatedAt[0]) || null
-    if (progress?.sentence_id) {
-      const { data: sentenceData, error } = await supabase
-        .from('sentences')
-        .select('id,content,translation,analysis,source,difficulty,exam_type,created_at')
-        .eq('id', progress.sentence_id)
-        .single()
-      if (!error && sentenceData) {
-        return {
-          sentence: mapSentenceRow(sentenceData as SentenceRow),
-          feedback: toAIFeedback(progress.ai_feedback)
+    const completedToday = isSentenceProgressDoneToday(progress, bounds)
+    if (completedToday && progress) {
+      const feedback = toAIFeedback(progress.ai_feedback)
+      if (feedback) {
+        const { data: sentenceData, error } = await supabase
+          .from('sentences')
+          .select('id,content,translation,analysis,source,difficulty,exam_type,created_at')
+          .eq('id', assignedSentenceId)
+          .single()
+        if (!error && sentenceData) {
+          return {
+            sentence: mapSentenceRow(sentenceData as SentenceRow),
+            feedback
+          }
         }
       }
     }
 
+    const { data, error } = await supabase
+      .from('sentences')
+      .select('id,content,translation,analysis,source,difficulty,exam_type,created_at')
+      .eq('id', assignedSentenceId)
+      .single()
+    if (error) throw new Error(error.message)
+    if (!data) throw new Error('No sentence available')
     return {
-      sentence: await this.getTodaySentence(),
+      sentence: mapSentenceRow(data as SentenceRow),
       feedback: null
     }
   },
@@ -579,8 +636,20 @@ export const learningApi = {
 
   async getTodayPlan(): Promise<DailyPlan> {
     const userId = await getCurrentUserId()
+    const examType = await getExamType(userId)
     const supabase = getSupabase()
-    const { date, startISO, endISO } = getTodayBounds()
+    const bounds = getTodayBounds()
+    const { date, startISO, endISO } = bounds
+
+    const assignedSentenceId = await getOrCreateAssignedSentenceId(userId, examType, supabase)
+    const { data: sentenceProgressForAssigned } = await supabase
+      .from('user_sentence_progress')
+      .select('last_attempt_date,updated_at')
+      .eq('user_id', userId)
+      .eq('sentence_id', assignedSentenceId)
+      .maybeSingle()
+
+    const sentenceCompleted = isSentenceProgressDoneToday(sentenceProgressForAssigned, bounds)
 
     const { data: settings } = await supabase
       .from('user_settings')
@@ -595,21 +664,6 @@ export const learningApi = {
       .gte('updated_at', startISO)
       .lt('updated_at', endISO)
 
-    const { data: todaySentenceByDate } = await supabase
-      .from('user_sentence_progress')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('last_attempt_date', date)
-      .limit(1)
-
-    const { data: todaySentenceByUpdatedAt } = await supabase
-      .from('user_sentence_progress')
-      .select('id')
-      .eq('user_id', userId)
-      .gte('updated_at', startISO)
-      .lt('updated_at', endISO)
-      .limit(1)
-
     const newWordsCompleted = (todayWords ?? []).filter((x: { is_new: boolean }) => x.is_new === false).length
     const reviewWordsCompleted = Math.max(0, (todayWords ?? []).length - newWordsCompleted)
 
@@ -619,10 +673,7 @@ export const learningApi = {
       reviewWordsTarget: settings?.daily_review_words ?? 60,
       newWordsCompleted,
       reviewWordsCompleted,
-      sentenceCompleted: Boolean(
-        (todaySentenceByDate && todaySentenceByDate.length > 0) ||
-        (todaySentenceByUpdatedAt && todaySentenceByUpdatedAt.length > 0)
-      ),
+      sentenceCompleted,
       estimatedMinutes: 30
     }
   },
@@ -853,8 +904,20 @@ export const learningApi = {
 
   async checkIn(): Promise<void> {
     const userId = await getCurrentUserId()
-    const { date, startISO, endISO } = getTodayBounds()
+    const examType = await getExamType(userId)
+    const bounds = getTodayBounds()
+    const { date, startISO, endISO } = bounds
     const supabase = getSupabase()
+
+    const assignedSentenceId = await getOrCreateAssignedSentenceId(userId, examType, supabase)
+    const { data: sentenceProgressForAssigned } = await supabase
+      .from('user_sentence_progress')
+      .select('last_attempt_date,updated_at')
+      .eq('user_id', userId)
+      .eq('sentence_id', assignedSentenceId)
+      .maybeSingle()
+
+    const sentenceCompleted = isSentenceProgressDoneToday(sentenceProgressForAssigned, bounds)
 
     const { data: todayWords } = await supabase
       .from('user_word_progress')
@@ -862,21 +925,6 @@ export const learningApi = {
       .eq('user_id', userId)
       .gte('updated_at', startISO)
       .lt('updated_at', endISO)
-
-    const { data: todaySentenceByDate } = await supabase
-      .from('user_sentence_progress')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('last_attempt_date', date)
-      .limit(1)
-
-    const { data: todaySentenceByUpdatedAt } = await supabase
-      .from('user_sentence_progress')
-      .select('id')
-      .eq('user_id', userId)
-      .gte('updated_at', startISO)
-      .lt('updated_at', endISO)
-      .limit(1)
 
     const { data: settings } = await supabase
       .from('user_settings')
@@ -893,10 +941,6 @@ export const learningApi = {
 
     const newWordsCompleted = (todayWords ?? []).filter((x: { is_new: boolean }) => x.is_new === false).length
     const reviewWordsCompleted = Math.max(0, (todayWords ?? []).length - newWordsCompleted)
-    const sentenceCompleted = Boolean(
-      (todaySentenceByDate && todaySentenceByDate.length > 0) ||
-      (todaySentenceByUpdatedAt && todaySentenceByUpdatedAt.length > 0)
-    )
 
     const newTarget = settings?.daily_new_words ?? 40
     const reviewTarget = settings?.daily_review_words ?? 60

@@ -1,0 +1,32 @@
+# 不依赖 Supabase pg_cron：用 GitHub 定时任务调用数据库函数
+# 北京时间约 05:00 → UTC 21:00（中国无夏令时）
+#
+# 仓库 Settings → Secrets → Actions 新增：
+#   SUPABASE_URL              例 https://xxxx.supabase.co
+#   SUPABASE_SERVICE_ROLE_KEY 仅用于此工作流，勿泄露
+
+name: Refresh daily sentences
+
+on:
+  schedule:
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call refresh_daily_sentence_assignments
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "缺少 Secrets：SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY"
+            exit 1
+          fi
+          curl -sS -X POST "${SUPABASE_URL}/rest/v1/rpc/refresh_daily_sentence_assignments" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}'

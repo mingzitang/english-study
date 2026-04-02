@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, onUnmounted, computed } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import { useLearningStore } from '@/stores/learning'
 import { useAuthStore } from '@/stores/auth'
@@ -11,9 +11,18 @@ const router = useRouter()
 const learningStore = useLearningStore()
 const authStore = useAuthStore()
 
-onMounted(() => {
+function refreshHomeData() {
   learningStore.loadTodayPlan()
   learningStore.loadStats()
+}
+
+onMounted(() => {
+  refreshHomeData()
+  const onVisibility = () => {
+    if (document.visibilityState === 'visible') refreshHomeData()
+  }
+  document.addEventListener('visibilitychange', onVisibility)
+  onUnmounted(() => document.removeEventListener('visibilitychange', onVisibility))
 })
 
 const todayPlan = computed(() => learningStore.todayPlan)
