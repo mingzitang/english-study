@@ -29,8 +29,11 @@ const annotations = ref<LocalAnnotation[]>([])
 /** 批注选词：按句中位置区分同形词（如多个 the） */
 const notePickSpans = ref<CharSpan[]>([])
 const draftNoteText = ref('')
-/** 词块 DOM（用于测量，可选） */
+/** 词块 DOM（用于测量批注标签位置） */
 const wordElRefs = new Map<string, HTMLElement>()
+/** 每条批注标签的 fixed 样式（按多词合并矩形水平居中） */
+const annotationBubbleStyles = ref<Record<string, Record<string, string>>>({})
+let layoutAnnRaf = 0
 /** 居中批注输入：打开时不可再选词 */
 const noteDraftModalOpen = ref(false)
 const expandedAnnotationId = ref<string | null>(null)
@@ -227,29 +230,72 @@ function toggleAnnotationExpand(id: string) {
   expandedAnnotationId.value = expandedAnnotationId.value === id ? null : id
 }
 
+function annotationDisplayText(a: LocalAnnotation) {
+  const t = a.text.trim()
+  return t ? t : '（无文字）'
+}
+
+function scheduleLayoutAnnotationBubbles() {
+  if (layoutAnnRaf) cancelAnimationFrame(layoutAnnRaf)
+  layoutAnnRaf = requestAnimationFrame(() => {
+    layoutAnnRaf = 0
+    layoutAnnotationBubbles()
+  })
+}
+
+function layoutAnnotationBubbles() {
+  const out: Record<string, Record<string, string>> = {}
+  for (const a of annotations.value) {
+    if (a.spans.length === 0) continue
+    const sorted = [...a.spans].sort((x: CharSpan, y: CharSpan) => x.start - y.start)
+    const rects: DOMRect[] = []
+    for (const s of sorted) {
+      const el = wordElRefs.get(spanKey(s))
+      if (el) rects.push(el.getBoundingClientRect())
+    }
+    if (rects.length === 0) continue
+    const left = Math.min(...rects.map(r => r.left))
+    const right = Math.max(...rects.map(r => r.right))
+    const top = Math.min(...rects.map(r => r.top))
+    const centerX = (left + right) / 2
+    // 贴近选区顶边、略向下，避免盖住上一行；水平对齐多词中心
+    out[a.id] = {
+      position: 'fixed',
+      left: `${centerX}px`,
+      top: `${top + 2}px`,
+      transform: 'translate(-50%, calc(-100% + 6px))',
+      zIndex: '25',
+      maxWidth: 'min(18rem, calc(100vw - 16px))'
+    }
+  }
+  annotationBubbleStyles.value = out
+}
+
 function onSentencePointerDown(e: PointerEvent) {
   if (noteDraftModalOpen.value) return
   if (!constituentMode.value && !notePickMode.value) return
   const sp = getCharSpanFromTarget(e.target)
   if (!sp) return
-  dragPreviewLoHi.value = null
   dragPointerId = e.pointerId
   dragState.value = { anchor: sp, last: sp, startX: e.clientX, startY: e.clientY }
+  dragPreviewLoHi.value = { lo: sp.start, hi: sp.end }
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
 }
 
 function onSentencePointerMove(e: PointerEvent) {
   if (dragPointerId == null || e.pointerId !== dragPointerId || !dragState.value) return
-  const el = document.elementFromPoint(e.clientX, e.clientY)
-  const sp = getCharSpanFromTarget(el)
-  if (sp) dragState.value.last = sp
+  const fromTarget = getCharSpanFromTarget(e.target as Node)
+  if (fromTarget) {
+    dragState.value.last = fromTarget
+  } else {
+    const el = document.elementFromPoint(e.clientX, e.clientY)
+    const sp = getCharSpanFromTarget(el)
+    if (sp) dragState.value.last = sp
+  }
   const ds = dragState.value
   const lo = Math.min(ds.anchor.start, ds.last.start)
   const hi = Math.max(ds.anchor.end, ds.last.end)
-  const dist = Math.hypot(e.clientX - ds.startX, e.clientY - ds.startY)
-  const rangeChanged = ds.anchor.start !== ds.last.start || ds.anchor.end !== ds.last.end
-  if (dist > 4 || rangeChanged) dragPreviewLoHi.value = { lo, hi }
-  else dragPreviewLoHi.value = null
+  dragPreviewLoHi.value = { lo, hi }
 }
 
 function onSentencePointerUp(e: PointerEvent) {
@@ -321,35 +367,6 @@ function toggleNoteSpan(span: CharSpan) {
   else notePickSpans.value.push(span)
 }
 
-/** 批注文案挂在这段词上方（仅在该批注首段位置显示） */
-function savedAnnotationAtPiece(p: SentencePiece): LocalAnnotation | null {
-  if (p.kind !== 'word') return null
-  for (const a of annotations.value) {
-    if (a.spans.length === 0) continue
-    const sorted = [...a.spans].sort((x: CharSpan, y: CharSpan) => x.start - y.start)
-    const head = sorted[0]
-    if (head.start === p.start && head.end === p.end) return a
-  }
-  return null
-}
-
-function savedAnnotationDisplayText(p: SentencePiece): string {
-  const a = savedAnnotationAtPiece(p)
-  if (!a) return ''
-  const t = a.text.trim()
-  return t ? t : '（无文字）'
-}
-
-function onAnnotationBubbleClick(p: SentencePiece) {
-  const a = savedAnnotationAtPiece(p)
-  if (a) toggleAnnotationExpand(a.id)
-}
-
-function onAnnotationDeleteClick(p: SentencePiece) {
-  const a = savedAnnotationAtPiece(p)
-  if (a) removeAnnotation(a.id)
-}
-
 /** 该词块是否属于已保存批注（任意一段完全命中） */
 function isWordInSavedAnnotation(p: SentencePiece & { kind: 'word' }) {
   return annotations.value.some((a: LocalAnnotation) =>
@@ -368,40 +385,14 @@ function cleanToken(raw: string) {
 function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   const clean = cleanToken(p.text)
   const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
-  const savedAnn = isWordInSavedAnnotation(p)
-  const prev = dragPreviewLoHi.value
-  const inPreview =
-    prev != null &&
-    (constituentMode.value || notePickMode.value) &&
-    pieceOverlapsCharRange(p, prev.lo, prev.hi)
-
   const base: Record<string, boolean> = {
     'cursor-pointer hover:text-primary transition-colors': true,
     'rounded px-0.5': true
-  }
-
-  if (inPreview && constituentMode.value) {
-    return {
-      ...base,
-      'bg-red-300/50 dark:bg-red-900/40 ring-1 ring-red-400/40': true
-    }
-  }
-  if (inPreview && notePickMode.value) {
-    return {
-      ...base,
-      'bg-sky-400/45 dark:bg-sky-700/45 ring-1 ring-sky-500/40': true
-    }
   }
   if (inNotePick) {
     return {
       ...base,
       'bg-sky-100/90 text-sky-900 dark:bg-sky-950/55 dark:text-sky-50': true
-    }
-  }
-  if (savedAnn) {
-    return {
-      ...base,
-      'bg-sky-200/70 dark:bg-sky-900/45 text-foreground': true
     }
   }
   if (clean && selectedWords.value.includes(clean)) {
@@ -413,11 +404,50 @@ function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   return base
 }
 
+/** 已保存批注 / 滑动预览：内联颜色，避免部分机型 Tailwind 不透明显示异常 */
+function wordOverlayStyle(p: SentencePiece & { kind: 'word' }) {
+  const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
+  if (inNotePick) return {}
+
+  const prev = dragPreviewLoHi.value
+  const inPreview =
+    prev != null &&
+    (constituentMode.value || notePickMode.value) &&
+    pieceOverlapsCharRange(p, prev.lo, prev.hi)
+  if (inPreview && constituentMode.value) {
+    return {
+      backgroundColor: 'rgba(248, 113, 113, 0.4)',
+      boxShadow: 'inset 0 0 0 1px rgba(220, 38, 38, 0.35)',
+      borderRadius: '3px'
+    }
+  }
+  if (inPreview && notePickMode.value) {
+    return {
+      backgroundColor: 'rgba(56, 189, 248, 0.42)',
+      boxShadow: 'inset 0 0 0 1px rgba(3, 105, 161, 0.45)',
+      borderRadius: '3px'
+    }
+  }
+  if (isWordInSavedAnnotation(p)) {
+    return {
+      backgroundColor: 'rgba(125, 211, 252, 0.75)',
+      borderRadius: '3px'
+    }
+  }
+  return {}
+}
+
 function hlPieceDragPreviewClass(p: SentencePiece & { kind: 'hl' }) {
   const prev = dragPreviewLoHi.value
   if (!prev || !constituentMode.value) return {}
   if (!pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
   return { 'ring-2 ring-red-500/50 ring-inset': true }
+}
+
+function hlOverlayStyle(p: SentencePiece & { kind: 'hl' }) {
+  const prev = dragPreviewLoHi.value
+  if (!prev || !constituentMode.value || !pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
+  return { boxShadow: 'inset 0 0 0 2px rgba(220, 38, 38, 0.45)' }
 }
 
 function resetLocalAnnotationState() {
@@ -431,6 +461,7 @@ function resetLocalAnnotationState() {
   dragPointerId = null
   dragState.value = null
   dragPreviewLoHi.value = null
+  annotationBubbleStyles.value = {}
   constituentMode.value = false
   notePickMode.value = false
   selRemove()
@@ -462,11 +493,28 @@ watch(
   }
 )
 
+watch(annotations, () => scheduleLayoutAnnotationBubbles(), { deep: true })
+
+watch(interactivePieces, () => scheduleLayoutAnnotationBubbles(), { deep: true })
+
+watch(sentenceReady, (ok: boolean) => {
+  if (ok) nextTick(() => scheduleLayoutAnnotationBubbles())
+})
+
+function onWinScrollOrResize() {
+  scheduleLayoutAnnotationBubbles()
+}
+
 onMounted(() => {
   loadSentence()
+  window.addEventListener('scroll', onWinScrollOrResize, true)
+  window.addEventListener('resize', onWinScrollOrResize)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('scroll', onWinScrollOrResize, true)
+  window.removeEventListener('resize', onWinScrollOrResize)
+  if (layoutAnnRaf) cancelAnimationFrame(layoutAnnRaf)
   resetLocalAnnotationState()
 })
 
@@ -499,6 +547,7 @@ function confirmDraftNote() {
   draftNoteText.value = ''
   noteDraftModalOpen.value = false
   expandedAnnotationId.value = null
+  nextTick(() => scheduleLayoutAnnotationBubbles())
 }
 
 function clearNotePickDraft() {
@@ -510,6 +559,7 @@ function clearNotePickDraft() {
 function removeAnnotation(id: string) {
   annotations.value = annotations.value.filter((a: LocalAnnotation) => a.id !== id)
   if (expandedAnnotationId.value === id) expandedAnnotationId.value = null
+  nextTick(() => scheduleLayoutAnnotationBubbles())
 }
 
 function onWordPieceClick(p: SentencePiece, e: MouseEvent) {
@@ -736,7 +786,10 @@ function goToSummary() {
           <p
             ref="sentenceInteractRef"
             class="text-foreground leading-relaxed text-lg relative overflow-visible [overflow-wrap:anywhere]"
-            :class="constituentMode || notePickMode ? 'touch-pan-y select-none' : ''"
+            :class="[
+              constituentMode || notePickMode ? 'touch-pan-y select-none' : '',
+              dragState ? 'touch-none' : ''
+            ]"
             style="-webkit-user-select: none; user-select: none"
             @pointerdown="onSentencePointerDown"
             @pointermove="onSentencePointerMove"
@@ -749,6 +802,7 @@ function goToSummary() {
                 v-else-if="p.kind === 'hl'"
                 class="rounded px-0.5 bg-red-100/90 dark:bg-red-950/40 text-foreground transition-shadow"
                 :class="[constituentMode ? 'cursor-pointer' : '', hlPieceDragPreviewClass(p)]"
+                :style="hlOverlayStyle(p)"
                 :data-sp-start="String(p.start)"
                 :data-sp-end="String(p.end)"
                 @click="onWordPieceClick(p, $event)"
@@ -758,37 +812,13 @@ function goToSummary() {
                 v-else
                 class="relative inline-block align-baseline max-w-full overflow-visible"
                 :class="wordPieceClasses(p)"
+                :style="wordOverlayStyle(p)"
                 :data-sp-start="String(p.start)"
                 :data-sp-end="String(p.end)"
                 :ref="(el) => setWordElRef(p, el)"
                 @click="onWordPieceClick(p, $event)"
+                >{{ p.text }}</span
               >
-                <!-- 紧贴词上方、无气泡装饰；横向小字 -->
-                <span
-                  v-if="savedAnnotationAtPiece(p)"
-                  class="pointer-events-auto absolute z-10 block w-max max-w-[min(18rem,calc(100vw-2rem))] text-left [writing-mode:horizontal-tb]"
-                  style="bottom: 100%; left: 0; margin-bottom: 0; transform: translate3d(0, 3px, 0)"
-                  @click.stop="onAnnotationBubbleClick(p)"
-                >
-                  <span
-                    class="relative inline-block px-0.5 py-0 text-[8px] font-normal leading-snug tracking-normal text-sky-900 dark:text-sky-100"
-                  >
-                    <span class="block whitespace-normal break-words [word-break:break-word]">{{
-                      savedAnnotationDisplayText(p)
-                    }}</span>
-                    <button
-                      v-if="savedAnnotationAtPiece(p) && expandedAnnotationId === savedAnnotationAtPiece(p)?.id"
-                      type="button"
-                      class="absolute -right-2 -top-2 flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-background/95 px-0.5 text-sm font-light leading-none text-muted-foreground shadow border border-border active:text-destructive"
-                      aria-label="删除批注"
-                      @click.stop="onAnnotationDeleteClick(p)"
-                    >
-                      ×
-                    </button>
-                  </span>
-                </span>
-                {{ p.text }}
-              </span>
             </template>
           </p>
           
@@ -1031,6 +1061,35 @@ function goToSummary() {
           </div>
         </div>
       </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <template v-for="a in annotations" :key="'ann-bubble-' + a.id">
+        <div
+          v-if="annotationBubbleStyles[a.id]"
+          class="pointer-events-auto text-left [writing-mode:horizontal-tb]"
+          :style="annotationBubbleStyles[a.id]"
+        >
+          <div
+            class="relative inline-block max-w-[min(18rem,calc(100vw-1rem))] cursor-default select-none px-0.5"
+            @click.stop="toggleAnnotationExpand(a.id)"
+          >
+            <span
+              class="block whitespace-normal break-words text-[8px] font-normal leading-snug text-sky-900 dark:text-sky-100"
+              >{{ annotationDisplayText(a) }}</span
+            >
+            <button
+              v-if="expandedAnnotationId === a.id"
+              type="button"
+              class="absolute -right-2 -top-2 flex h-5 min-w-[1.25rem] items-center justify-center rounded-full border border-border bg-background/95 px-0.5 text-sm font-light text-muted-foreground shadow active:text-destructive"
+              aria-label="删除批注"
+              @click.stop="removeAnnotation(a.id)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      </template>
     </Teleport>
 
     <div
