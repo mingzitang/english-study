@@ -566,7 +566,7 @@ function constituentWordDragPreviewClass(p: SentencePiece & { kind: 'word' }) {
 function getDoodlePaint() {
   const dark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
   return {
-    stroke: dark ? 'rgba(248, 250, 252, 0.88)' : 'rgba(15, 23, 42, 0.78)',
+    stroke: dark ? 'rgba(248, 113, 113, 0.92)' : 'rgba(220, 38, 38, 0.88)',
     lineWidth: 2.25
   }
 }
