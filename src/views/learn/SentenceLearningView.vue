@@ -1017,10 +1017,10 @@ function goToSummary() {
       
       <!-- 句子内容 -->
       <div v-else-if="sentence" class="p-4 space-y-4">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2 md:gap-3 touch-manipulation">
           <button
             type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
+            class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
             :class="constituentMode ? 'border-primary text-primary bg-primary/5' : ''"
             @click="constituentMode = !constituentMode"
           >
@@ -1029,14 +1029,14 @@ function goToSummary() {
           <button
             v-if="constituentMode"
             type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary"
+            class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-border text-muted-foreground hover:bg-secondary"
             @click="clearHighlights"
           >
             清除划分
           </button>
           <button
             type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
+            class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
             :class="notePickMode ? 'border-primary text-primary bg-primary/5' : ''"
             @click="notePickMode = !notePickMode"
           >
@@ -1045,14 +1045,14 @@ function goToSummary() {
           <button
             v-if="notePickMode && !noteDraftModalOpen && notePickSpans.length > 0"
             type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-sky-300 bg-sky-50 text-sky-800 hover:bg-sky-100 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-100"
+            class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-sky-300 bg-sky-50 text-sky-800 hover:bg-sky-100 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-100"
             @click="openNoteDraftModal"
           >
             填写批注
           </button>
           <button
             type="button"
-            class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
+            class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
             :class="doodleMode ? 'border-primary text-primary bg-primary/5' : ''"
             @click="toggleDoodleMode"
           >
@@ -1061,7 +1061,7 @@ function goToSummary() {
           <template v-if="doodleMode">
             <button
               type="button"
-              class="text-xs px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary disabled:opacity-40 disabled:pointer-events-none"
+              class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-border text-muted-foreground hover:bg-secondary disabled:opacity-40 disabled:pointer-events-none"
               :disabled="!canUndoDoodle"
               @click="undoDoodleStroke"
             >
@@ -1069,7 +1069,7 @@ function goToSummary() {
             </button>
             <button
               type="button"
-              class="text-xs px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary"
+              class="text-xs px-3 py-1.5 md:py-2 md:min-h-10 rounded-lg border border-border text-muted-foreground hover:bg-secondary"
               @click="clearDoodleStrokesOnly"
             >
               清除涂鸦

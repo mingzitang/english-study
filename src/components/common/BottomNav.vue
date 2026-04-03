@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useRoute, RouterLink } from 'vue-router'
+import { LEARNER_CHROME_INNER_CLASS } from '@/layouts/learnerLayoutTokens'
 
 const route = useRoute()
 
@@ -28,12 +29,12 @@ function isActive(name: string) {
 
 <template>
   <nav class="fixed bottom-0 left-0 right-0 bg-card border-t border-border safe-area-bottom z-50">
-    <div class="flex justify-around items-center h-16 max-w-lg mx-auto">
+    <div :class="[LEARNER_CHROME_INNER_CLASS, 'flex justify-around items-center h-16 md:h-[4.25rem] touch-manipulation']">
       <RouterLink
         v-for="item in navItems"
         :key="item.name"
         :to="{ name: item.name }"
-        class="flex flex-col items-center justify-center flex-1 py-2 transition-colors"
+        class="flex flex-col items-center justify-center flex-1 py-2 md:py-2.5 min-h-11 transition-colors"
         :class="[
           isActive(item.name) 
             ? 'text-primary' 
