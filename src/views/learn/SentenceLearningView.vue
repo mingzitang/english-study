@@ -51,7 +51,7 @@ const suppressNextWordClick = ref(false)
 
 /** 会话涂鸦：落画在原句卡片区域，不落库 */
 const doodleMode = ref(false)
-const doodleWrapRef = ref<HTMLElement | null>(null)
+const doodleCardRef = ref<HTMLElement | null>(null)
 const doodleCanvasRef = ref<HTMLCanvasElement | null>(null)
 const doodleStrokes = ref<DoodleStroke[]>([])
 let activeDoodlePoints: DoodlePoint[] | null = null
@@ -611,10 +611,10 @@ function drawDoodleStroke(
 
 function resizeDoodleCanvasAndRedraw() {
   const canvas = doodleCanvasRef.value
-  const wrap = doodleWrapRef.value
-  if (!canvas || !wrap || !doodleMode.value) return
-  const w = Math.max(1, wrap.clientWidth)
-  const h = Math.max(1, wrap.clientHeight)
+  const card = doodleCardRef.value
+  if (!canvas || !card || !doodleMode.value) return
+  const w = Math.max(1, card.clientWidth)
+  const h = Math.max(1, card.clientHeight)
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
   canvas.width = Math.floor(w * dpr)
   canvas.height = Math.floor(h * dpr)
@@ -704,12 +704,12 @@ function teardownDoodleResizeObserver() {
 }
 function attachDoodleResizeObserver() {
   teardownDoodleResizeObserver()
-  const wrap = doodleWrapRef.value
-  if (!wrap || typeof ResizeObserver === 'undefined') return
+  const card = doodleCardRef.value
+  if (!card || typeof ResizeObserver === 'undefined') return
   doodleResizeObserver = new ResizeObserver(() => {
     if (doodleMode.value) resizeDoodleCanvasAndRedraw()
   })
-  doodleResizeObserver.observe(wrap)
+  doodleResizeObserver.observe(card)
 }
 
 function clearDoodleStrokesOnly() {
@@ -1077,7 +1077,7 @@ function goToSummary() {
           </template>
         </div>
         <p v-if="doodleMode" class="text-xs text-muted-foreground -mt-2">
-          涂鸦：在句子上自由绘制；「撤回上一笔」「清除涂鸦」仅影响笔迹。退出后可再开划成分/批注。
+          涂鸦：可画至<strong>卡片圆角外框</strong>（含四周留白）；「撤回上一笔」「清除涂鸦」仅影响笔迹。退出后可再开划成分/批注。
         </p>
         <p v-else-if="constituentMode && !notePickMode" class="text-xs text-muted-foreground -mt-2">
           划成分：<strong>连续浅蓝底</strong>标出语法块；点/滑跨选有<strong>浅蓝预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除相交划分。此模式下不可查义。
@@ -1104,10 +1104,13 @@ function goToSummary() {
           </span>
         </div>
         
-        <!-- 英文句子 -->
-        <div class="bg-card rounded-xl p-4 border border-border">
-          <p class="text-xs text-muted-foreground mb-2">英文原句</p>
-          <div ref="doodleWrapRef" class="relative">
+        <!-- 英文句子：外层无 padding，canvas inset-0 铺满至圆角边框；内层 p-4 仅用于正文留白 -->
+        <div
+          ref="doodleCardRef"
+          class="bg-card rounded-xl border border-border relative overflow-hidden"
+        >
+          <div class="relative z-[1] p-4">
+            <p class="text-xs text-muted-foreground mb-2">英文原句</p>
             <p
               ref="sentenceInteractRef"
               class="text-foreground leading-relaxed text-lg relative overflow-visible [overflow-wrap:anywhere]"
@@ -1146,51 +1149,59 @@ function goToSummary() {
                 >
               </template>
             </p>
-            <canvas
-              v-show="doodleMode"
-              ref="doodleCanvasRef"
-              class="absolute inset-0 z-[2] h-full w-full touch-none select-none cursor-crosshair pointer-events-auto rounded-sm"
-              aria-label="涂鸦画布"
-              @pointerdown="onDoodlePointerDown"
-              @pointermove="onDoodlePointerMove"
-              @pointerup="onDoodlePointerUp"
-              @pointercancel="onDoodlePointerCancel"
-            />
-          </div>
-          
-          <!-- 生词选择提示 -->
-          <p v-if="selectedWords.length > 0" class="text-xs text-muted-foreground mt-3">
-            已选择 {{ selectedWords.length }} 个生词
-            <button 
-              @click="addSelectedWordsToVocabulary"
-              class="text-primary font-medium ml-2"
-            >
-              加入生词本
-            </button>
-          </p>
-          <p v-if="addWordMessage" class="text-xs mt-2 text-primary">
-            {{ addWordMessage }}
-          </p>
 
-          <div v-if="lookupVisible" class="mt-3 relative">
-            <div class="absolute -top-2 left-6 w-3 h-3 bg-card border-l border-t border-border rotate-45" />
-            <div class="bg-card border border-border rounded-xl p-3">
-              <p class="text-xs text-muted-foreground mb-1">单词释义</p>
-              <p class="text-sm font-semibold text-foreground">
-                {{ lookupWord }} <span v-if="lookupPhonetic" class="text-xs text-muted-foreground ml-1">{{ lookupPhonetic }}</span>
-              </p>
-              <p v-if="lookupSource" class="text-[11px] text-primary mt-1">{{ lookupSource }}</p>
-              <p v-if="lookupLoading" class="text-xs text-muted-foreground mt-2">查询中...</p>
-              <template v-else>
-                <p v-if="lookupMessage" class="text-xs text-muted-foreground mt-2">{{ lookupMessage }}</p>
-                <ul v-else class="mt-2 space-y-1">
-                  <li v-for="(meaning, index) in lookupMeanings" :key="index" class="text-xs text-foreground">
-                    <span class="text-primary mr-1">{{ meaning.partOfSpeech }}</span>{{ meaning.definition }}
-                  </li>
-                </ul>
-              </template>
+            <!-- 生词选择提示 -->
+            <p
+              v-if="selectedWords.length > 0"
+              class="text-xs text-muted-foreground mt-3"
+              :class="doodleMode ? 'pointer-events-none' : ''"
+            >
+              已选择 {{ selectedWords.length }} 个生词
+              <button
+                @click="addSelectedWordsToVocabulary"
+                class="text-primary font-medium ml-2"
+              >
+                加入生词本
+              </button>
+            </p>
+            <p v-if="addWordMessage" class="text-xs mt-2 text-primary">
+              {{ addWordMessage }}
+            </p>
+
+            <div
+              v-if="lookupVisible"
+              class="mt-3 relative"
+              :class="doodleMode ? 'pointer-events-none' : ''"
+            >
+              <div class="absolute -top-2 left-6 w-3 h-3 bg-card border-l border-t border-border rotate-45" />
+              <div class="bg-card border border-border rounded-xl p-3">
+                <p class="text-xs text-muted-foreground mb-1">单词释义</p>
+                <p class="text-sm font-semibold text-foreground">
+                  {{ lookupWord }} <span v-if="lookupPhonetic" class="text-xs text-muted-foreground ml-1">{{ lookupPhonetic }}</span>
+                </p>
+                <p v-if="lookupSource" class="text-[11px] text-primary mt-1">{{ lookupSource }}</p>
+                <p v-if="lookupLoading" class="text-xs text-muted-foreground mt-2">查询中...</p>
+                <template v-else>
+                  <p v-if="lookupMessage" class="text-xs text-muted-foreground mt-2">{{ lookupMessage }}</p>
+                  <ul v-else class="mt-2 space-y-1">
+                    <li v-for="(meaning, index) in lookupMeanings" :key="index" class="text-xs text-foreground">
+                      <span class="text-primary mr-1">{{ meaning.partOfSpeech }}</span>{{ meaning.definition }}
+                    </li>
+                  </ul>
+                </template>
+              </div>
             </div>
           </div>
+          <canvas
+            v-show="doodleMode"
+            ref="doodleCanvasRef"
+            class="absolute inset-0 z-[2] touch-none select-none cursor-crosshair pointer-events-auto rounded-xl"
+            aria-label="涂鸦画布"
+            @pointerdown="onDoodlePointerDown"
+            @pointermove="onDoodlePointerMove"
+            @pointerup="onDoodlePointerUp"
+            @pointercancel="onDoodlePointerCancel"
+          />
         </div>
         
         <!-- 翻译输入区 (未提交时显示) -->
