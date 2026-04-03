@@ -13,16 +13,15 @@ type CharSpan = { start: number; end: number }
 type LocalAnnotation = { id: string; spans: CharSpan[]; text: string }
 
 type SentencePiece =
-  | { kind: 'hl'; text: string; start: number; end: number }
-  | { kind: 'word'; text: string; start: number; end: number }
-  | { kind: 'space'; text: string; start: number; end: number }
+  | { kind: 'word'; text: string; start: number; end: number; constituent: boolean }
+  | { kind: 'space'; text: string; start: number; end: number; constituent: boolean }
 
 const router = useRouter()
 const learningStore = useLearningStore()
 
 const sentenceInteractRef = ref<HTMLElement | null>(null)
 const constituentMode = ref(false)
-/** 触屏批注：开启后点词加入批注缓冲，无需 Ctrl/⌘（与划成分互斥） */
+/** 批注选词：可与划成分同时开启；同时开时点/滑优先批注 */
 const notePickMode = ref(false)
 const highlights = ref<HighlightRange[]>([])
 const annotations = ref<LocalAnnotation[]>([])
@@ -145,6 +144,7 @@ const segmentPieces = computed(() => {
   return segmentsFromMerged(full, mergedHighlightSpans(highlights.value))
 })
 
+/** 始终拆到词/空格，划成分区间用 constituent 标记，便于与批注重叠交互 */
 const interactivePieces = computed((): SentencePiece[] => {
   const full = sentence.value?.content ?? ''
   if (!full) return []
@@ -152,21 +152,14 @@ const interactivePieces = computed((): SentencePiece[] => {
   const out: SentencePiece[] = []
   let offset = 0
   for (const s of segs) {
-    if (s.highlighted) {
-      if (s.text) {
-        const start = offset
-        offset += s.text.length
-        out.push({ kind: 'hl', text: s.text, start, end: offset })
-      }
-      continue
-    }
     const parts = s.text.split(/(\s+)/)
     for (const part of parts) {
       if (!part) continue
       const start = offset
       offset += part.length
-      if (/^\s+$/.test(part)) out.push({ kind: 'space', text: part, start, end: offset })
-      else out.push({ kind: 'word', text: part, start, end: offset })
+      const c = s.highlighted
+      if (/^\s+$/.test(part)) out.push({ kind: 'space', text: part, start, end: offset, constituent: c })
+      else out.push({ kind: 'word', text: part, start, end: offset, constituent: c })
     }
   }
   return out
@@ -324,15 +317,15 @@ function onSentencePointerUp(e: PointerEvent) {
   const lo = Math.min(ds.anchor.start, ds.last.start)
   const hi = Math.max(ds.anchor.end, ds.last.end)
 
-  if (constituentMode.value) {
-    highlights.value.push({ id: randomId(), start: lo, end: hi })
-  } else if (notePickMode.value) {
+  if (notePickMode.value) {
     const words = collectWordsOverlapping(lo, hi)
     for (const w of words) {
       if (!notePickSpans.value.some((s: CharSpan) => spansEqual(s, w))) {
         notePickSpans.value.push(w)
       }
     }
+  } else if (constituentMode.value) {
+    highlights.value.push({ id: randomId(), start: lo, end: hi })
   }
   selRemove()
 }
@@ -356,9 +349,8 @@ function toggleConstituentRange(span: CharSpan) {
   else highlights.value.push({ id: randomId(), start: span.start, end: span.end })
 }
 
-/** 点击已合并的浅红块：去掉与该显示块相交的划分 */
-function removeHighlightsOverlappingPiece(p: SentencePiece & { kind: 'hl' }) {
-  highlights.value = highlights.value.filter((h: HighlightRange) => !(h.start < p.end && h.end > p.start))
+function removeHighlightsOverlappingRange(start: number, end: number) {
+  highlights.value = highlights.value.filter((h: HighlightRange) => !(h.start < end && h.end > start))
 }
 
 function toggleNoteSpan(span: CharSpan) {
@@ -437,6 +429,9 @@ function spaceBridgeOverlay(pi: number): Record<string, string> {
   if (wordInDragPreview(wa) && wordInDragPreview(wb) && (constituentMode.value || notePickMode.value)) {
     return { backgroundColor: 'rgba(254, 226, 226, 0.65)' }
   }
+  if (wa.constituent && wb.constituent) {
+    return { backgroundColor: 'rgba(254, 202, 202, 0.5)' }
+  }
   return {}
 }
 
@@ -492,23 +487,24 @@ function wordOverlayStyle(p: SentencePiece & { kind: 'word' }) {
   if (isWordInSavedAnnotation(p)) {
     return {
       backgroundColor: 'rgba(224, 242, 254, 0.55)',
+      borderRadius: '2px',
+      boxShadow: p.constituent ? 'inset 0 0 0 1px rgba(251, 113, 133, 0.5)' : undefined
+    }
+  }
+  if (p.constituent) {
+    return {
+      backgroundColor: 'rgba(254, 202, 202, 0.5)',
       borderRadius: '2px'
     }
   }
   return {}
 }
 
-function hlPieceDragPreviewClass(p: SentencePiece & { kind: 'hl' }) {
+function constituentWordDragPreviewClass(p: SentencePiece & { kind: 'word' }) {
   const prev = dragPreviewLoHi.value
-  if (!prev || !constituentMode.value) return {}
-  if (!pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
-  return { 'ring-2 ring-red-500/50 ring-inset': true }
-}
-
-function hlOverlayStyle(p: SentencePiece & { kind: 'hl' }) {
-  const prev = dragPreviewLoHi.value
-  if (!prev || !constituentMode.value || !pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
-  return { boxShadow: 'inset 0 0 0 2px rgba(252, 165, 165, 0.4)' }
+  if (!prev || !constituentMode.value || notePickMode.value) return {}
+  if (!p.constituent || !pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
+  return { 'ring-2 ring-red-400/45 ring-inset': true }
 }
 
 function resetLocalAnnotationState() {
@@ -528,18 +524,8 @@ function resetLocalAnnotationState() {
   selRemove()
 }
 
-watch(constituentMode, (on: boolean) => {
-  if (on) {
-    notePickMode.value = false
-    notePickSpans.value = []
-    draftNoteText.value = ''
-    noteDraftModalOpen.value = false
-    expandedAnnotationId.value = null
-  }
-})
 watch(notePickMode, (on: boolean) => {
-  if (on) constituentMode.value = false
-  else {
+  if (!on) {
     notePickSpans.value = []
     draftNoteText.value = ''
     noteDraftModalOpen.value = false
@@ -632,26 +618,23 @@ function onWordPieceClick(p: SentencePiece, e: MouseEvent) {
     e.preventDefault()
     return
   }
-  if (p.kind === 'hl') {
-    if (constituentMode.value) {
-      e.preventDefault()
-      removeHighlightsOverlappingPiece(p)
-    }
-    return
-  }
   if (p.kind !== 'word') return
 
   const cleanWord = cleanToken(p.text)
   if (!cleanWord) return
 
-  if (constituentMode.value) {
-    e.preventDefault()
-    toggleConstituentRange({ start: p.start, end: p.end })
-    return
-  }
   if (notePickMode.value) {
     e.preventDefault()
     toggleNoteSpan({ start: p.start, end: p.end })
+    return
+  }
+  if (constituentMode.value) {
+    e.preventDefault()
+    if (p.constituent && e.detail >= 2) {
+      removeHighlightsOverlappingRange(p.start, p.end)
+      return
+    }
+    toggleConstituentRange({ start: p.start, end: p.end })
     return
   }
   if (!feedback.value) {
@@ -802,7 +785,6 @@ function goToSummary() {
             清除划分
           </button>
           <button
-            v-if="!constituentMode"
             type="button"
             class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
             :class="notePickMode ? 'border-primary text-primary bg-primary/5' : ''"
@@ -819,11 +801,14 @@ function goToSummary() {
             填写批注
           </button>
         </div>
-        <p v-if="constituentMode" class="text-xs text-muted-foreground -mt-2">
-          点词或<strong>滑动</strong>跨选；滑动时<strong>浅红预览</strong>。点同一词取消划分；点浅红整段清除。此模式下不可查义。
+        <p v-if="constituentMode && !notePickMode" class="text-xs text-muted-foreground -mt-2">
+          划成分：点词或<strong>滑动</strong>跨选，<strong>浅红预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除与该词相交的划分。此模式下不可查义。
         </p>
-        <p v-else-if="notePickMode" class="text-xs text-muted-foreground -mt-2">
-          点词或<strong>滑动</strong>多选（滑动时<strong>浅红预览</strong>）→「填写批注」在中间输入；弹窗打开时不能再增选。已保存批注为<strong>更浅蓝底连成一片</strong>。
+        <p v-else-if="notePickMode && !constituentMode" class="text-xs text-muted-foreground -mt-2">
+          批注：点/滑多选（<strong>浅红预览</strong>）→「填写批注」；弹窗打开时不能再增选。已保存为<strong>浅蓝底连片</strong>。
+        </p>
+        <p v-else-if="constituentMode && notePickMode" class="text-xs text-muted-foreground -mt-2">
+          <strong>划成分</strong>与<strong>批注选词</strong>已同时开启：点/滑<strong>优先批注</strong>；关闭「批注选词」后，点/滑再用于划成分。已划红段上仍可批注。划成分下单击调划分、双击已划词可清相交划分。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
           未提交翻译时点词只用于选生词、不弹释义；提交后可点词查义。电脑也可
@@ -865,19 +850,13 @@ function goToSummary() {
                 >{{ p.text }}</span
               >
               <span
-                v-else-if="p.kind === 'hl'"
-                class="rounded px-0.5 bg-red-100/90 dark:bg-red-950/40 text-foreground transition-shadow"
-                :class="[constituentMode ? 'cursor-pointer' : '', hlPieceDragPreviewClass(p)]"
-                :style="hlOverlayStyle(p)"
-                :data-sp-start="String(p.start)"
-                :data-sp-end="String(p.end)"
-                @click="onWordPieceClick(p, $event)"
-                >{{ p.text }}</span
-              >
-              <span
                 v-else
-                class="relative inline-block align-baseline max-w-full overflow-visible"
-                :class="wordPieceClasses(p)"
+                class="relative inline-block align-baseline max-w-full overflow-visible transition-shadow"
+                :class="[
+                  wordPieceClasses(p),
+                  constituentMode && p.constituent ? 'cursor-pointer' : '',
+                  constituentWordDragPreviewClass(p)
+                ]"
                 :style="wordOverlayStyle(p)"
                 :data-sp-start="String(p.start)"
                 :data-sp-end="String(p.end)"
