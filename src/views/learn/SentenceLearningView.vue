@@ -24,6 +24,9 @@ type SentencePiece =
   | { kind: 'word'; text: string; start: number; end: number; constituent: boolean }
   | { kind: 'space'; text: string; start: number; end: number; constituent: boolean }
 
+type DoodlePoint = { nx: number; ny: number }
+type DoodleStroke = { points: DoodlePoint[] }
+
 const router = useRouter()
 const learningStore = useLearningStore()
 
@@ -45,6 +48,14 @@ let layoutAnnRaf = 0
 const noteDraftModalOpen = ref(false)
 const expandedAnnotationId = ref<string | null>(null)
 const suppressNextWordClick = ref(false)
+
+/** 会话涂鸦：落画在原句卡片区域，不落库 */
+const doodleMode = ref(false)
+const doodleWrapRef = ref<HTMLElement | null>(null)
+const doodleCanvasRef = ref<HTMLCanvasElement | null>(null)
+const doodleStrokes = ref<DoodleStroke[]>([])
+let activeDoodlePoints: DoodlePoint[] | null = null
+const canUndoDoodle = computed(() => doodleStrokes.value.length > 0)
 
 /** 滑动选中（划成分 / 批注） */
 let dragPointerId: number | null = null
@@ -273,6 +284,7 @@ function layoutAnnotationBubbles() {
 }
 
 function onSentencePointerDown(e: PointerEvent) {
+  if (doodleMode.value) return
   if (noteDraftModalOpen.value) return
   if (!constituentMode.value && !notePickMode.value) return
   const sp = getCharSpanFromTarget(e.target)
@@ -551,7 +563,182 @@ function constituentWordDragPreviewClass(p: SentencePiece & { kind: 'word' }) {
   return { 'ring-2 ring-sky-400/50 ring-inset': true }
 }
 
+function getDoodlePaint() {
+  const dark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  return {
+    stroke: dark ? 'rgba(248, 250, 252, 0.88)' : 'rgba(15, 23, 42, 0.78)',
+    lineWidth: 2.25
+  }
+}
+
+function pointerToNorm(e: PointerEvent): DoodlePoint | null {
+  const canvas = doodleCanvasRef.value
+  if (!canvas) return null
+  const r = canvas.getBoundingClientRect()
+  if (r.width <= 0 || r.height <= 0) return null
+  return { nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height }
+}
+
+function drawDoodleStroke(
+  ctx: CanvasRenderingContext2D,
+  points: DoodlePoint[],
+  w: number,
+  h: number,
+  strokeStyle: string,
+  lineWidth: number
+) {
+  if (points.length === 0) return
+  ctx.strokeStyle = strokeStyle
+  ctx.fillStyle = strokeStyle
+  ctx.lineWidth = lineWidth
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
+  if (points.length === 1) {
+    const x = points[0].nx * w
+    const y = points[0].ny * h
+    ctx.beginPath()
+    ctx.arc(x, y, Math.max(lineWidth * 0.45, 0.8), 0, Math.PI * 2)
+    ctx.fill()
+    return
+  }
+  ctx.beginPath()
+  ctx.moveTo(points[0].nx * w, points[0].ny * h)
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].nx * w, points[i].ny * h)
+  }
+  ctx.stroke()
+}
+
+function resizeDoodleCanvasAndRedraw() {
+  const canvas = doodleCanvasRef.value
+  const wrap = doodleWrapRef.value
+  if (!canvas || !wrap || !doodleMode.value) return
+  const w = Math.max(1, wrap.clientWidth)
+  const h = Math.max(1, wrap.clientHeight)
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  canvas.width = Math.floor(w * dpr)
+  canvas.height = Math.floor(h * dpr)
+  canvas.style.width = `${w}px`
+  canvas.style.height = `${h}px`
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
+  const { stroke, lineWidth } = getDoodlePaint()
+  for (const s of doodleStrokes.value) {
+    drawDoodleStroke(ctx, s.points, w, h, stroke, lineWidth)
+  }
+  if (activeDoodlePoints && activeDoodlePoints.length > 0) {
+    drawDoodleStroke(ctx, activeDoodlePoints, w, h, stroke, lineWidth)
+  }
+}
+
+function toggleDoodleMode() {
+  const next = !doodleMode.value
+  if (next) {
+    constituentMode.value = false
+    notePickMode.value = false
+    dragPointerId = null
+    dragState.value = null
+    dragPreviewLoHi.value = null
+  }
+  doodleMode.value = next
+  nextTick(() => resizeDoodleCanvasAndRedraw())
+}
+
+function onDoodlePointerDown(e: PointerEvent) {
+  if (!doodleMode.value) return
+  e.preventDefault()
+  e.stopPropagation()
+  const n = pointerToNorm(e)
+  if (!n) return
+  activeDoodlePoints = [n]
+  ;(e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId)
+  resizeDoodleCanvasAndRedraw()
+}
+
+function onDoodlePointerMove(e: PointerEvent) {
+  if (!doodleMode.value || !activeDoodlePoints) return
+  e.preventDefault()
+  const n = pointerToNorm(e)
+  if (!n) return
+  const last = activeDoodlePoints[activeDoodlePoints.length - 1]
+  if (Math.hypot(n.nx - last.nx, n.ny - last.ny) < 0.0015) return
+  activeDoodlePoints.push(n)
+  resizeDoodleCanvasAndRedraw()
+}
+
+function onDoodlePointerUp(e: PointerEvent) {
+  if (!doodleMode.value || !activeDoodlePoints) return
+  e.preventDefault()
+  e.stopPropagation()
+  try {
+    ;(e.currentTarget as HTMLCanvasElement).releasePointerCapture(e.pointerId)
+  } catch {
+    /* */
+  }
+  const n = pointerToNorm(e)
+  if (n) activeDoodlePoints.push(n)
+  if (activeDoodlePoints.length > 0) {
+    doodleStrokes.value.push({ points: [...activeDoodlePoints] })
+  }
+  activeDoodlePoints = null
+  resizeDoodleCanvasAndRedraw()
+}
+
+function onDoodlePointerCancel(e: PointerEvent) {
+  if (!activeDoodlePoints) return
+  try {
+    ;(e.currentTarget as HTMLCanvasElement).releasePointerCapture(e.pointerId)
+  } catch {
+    /* */
+  }
+  activeDoodlePoints = null
+  resizeDoodleCanvasAndRedraw()
+}
+
+let doodleResizeObserver: ResizeObserver | null = null
+function teardownDoodleResizeObserver() {
+  doodleResizeObserver?.disconnect()
+  doodleResizeObserver = null
+}
+function attachDoodleResizeObserver() {
+  teardownDoodleResizeObserver()
+  const wrap = doodleWrapRef.value
+  if (!wrap || typeof ResizeObserver === 'undefined') return
+  doodleResizeObserver = new ResizeObserver(() => {
+    if (doodleMode.value) resizeDoodleCanvasAndRedraw()
+  })
+  doodleResizeObserver.observe(wrap)
+}
+
+function clearDoodleStrokesOnly() {
+  doodleStrokes.value = []
+  activeDoodlePoints = null
+  resizeDoodleCanvasAndRedraw()
+}
+
+function undoDoodleStroke() {
+  if (doodleStrokes.value.length === 0) return
+  doodleStrokes.value.pop()
+  activeDoodlePoints = null
+  resizeDoodleCanvasAndRedraw()
+}
+
+/** 切句 / 卸载时清空涂鸦与会话笔迹 */
+function resetDoodleSession() {
+  doodleMode.value = false
+  doodleStrokes.value = []
+  activeDoodlePoints = null
+  const canvas = doodleCanvasRef.value
+  if (canvas) {
+    const ctx = canvas.getContext('2d')
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
+  }
+}
+
 function resetLocalAnnotationState() {
+  resetDoodleSession()
   highlights.value = []
   annotations.value = []
   notePickSpans.value = []
@@ -581,6 +768,7 @@ watch(
   () => sentence.value?.id,
   () => {
     resetLocalAnnotationState()
+    nextTick(() => attachDoodleResizeObserver())
   }
 )
 
@@ -589,11 +777,20 @@ watch(annotations, () => scheduleLayoutAnnotationBubbles(), { deep: true })
 watch(interactivePieces, () => scheduleLayoutAnnotationBubbles(), { deep: true })
 
 watch(sentenceReady, (ok: boolean) => {
-  if (ok) nextTick(() => scheduleLayoutAnnotationBubbles())
+  if (ok)
+    nextTick(() => {
+      scheduleLayoutAnnotationBubbles()
+      attachDoodleResizeObserver()
+    })
+})
+
+watch(doodleMode, (on: boolean) => {
+  if (on) nextTick(() => attachDoodleResizeObserver())
 })
 
 function onWinScrollOrResize() {
   scheduleLayoutAnnotationBubbles()
+  if (doodleMode.value) resizeDoodleCanvasAndRedraw()
 }
 
 onMounted(() => {
@@ -606,13 +803,18 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', onWinScrollOrResize, true)
   window.removeEventListener('resize', onWinScrollOrResize)
   if (layoutAnnRaf) cancelAnimationFrame(layoutAnnRaf)
+  teardownDoodleResizeObserver()
   resetLocalAnnotationState()
 })
 
 async function submitTranslation() {
   if (!sentence.value || !userTranslation.value.trim()) return
-  
-  await learningStore.submitTranslation(sentence.value.id, userTranslation.value)
+  const result = await learningStore.submitTranslation(sentence.value.id, userTranslation.value)
+  if (result != null) {
+    resetDoodleSession()
+    await nextTick()
+    resizeDoodleCanvasAndRedraw()
+  }
 }
 
 function toggleAnalysis() {
@@ -654,6 +856,10 @@ function removeAnnotation(id: string) {
 }
 
 function onWordPieceClick(p: SentencePiece, e: MouseEvent) {
+  if (doodleMode.value) {
+    e.preventDefault()
+    return
+  }
   if (suppressNextWordClick.value) {
     e.preventDefault()
     return
@@ -844,8 +1050,36 @@ function goToSummary() {
           >
             填写批注
           </button>
+          <button
+            type="button"
+            class="text-xs px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition-colors"
+            :class="doodleMode ? 'border-primary text-primary bg-primary/5' : ''"
+            @click="toggleDoodleMode"
+          >
+            {{ doodleMode ? '退出涂鸦' : '涂鸦' }}
+          </button>
+          <template v-if="doodleMode">
+            <button
+              type="button"
+              class="text-xs px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary disabled:opacity-40 disabled:pointer-events-none"
+              :disabled="!canUndoDoodle"
+              @click="undoDoodleStroke"
+            >
+              撤回上一笔
+            </button>
+            <button
+              type="button"
+              class="text-xs px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary"
+              @click="clearDoodleStrokesOnly"
+            >
+              清除涂鸦
+            </button>
+          </template>
         </div>
-        <p v-if="constituentMode && !notePickMode" class="text-xs text-muted-foreground -mt-2">
+        <p v-if="doodleMode" class="text-xs text-muted-foreground -mt-2">
+          涂鸦：在句子上自由绘制；「撤回上一笔」「清除涂鸦」仅影响笔迹。退出后可再开划成分/批注。
+        </p>
+        <p v-else-if="constituentMode && !notePickMode" class="text-xs text-muted-foreground -mt-2">
           划成分：<strong>连续浅蓝底</strong>标出语法块；点/滑跨选有<strong>浅蓝预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除相交划分。此模式下不可查义。
         </p>
         <p v-else-if="notePickMode && !constituentMode" class="text-xs text-muted-foreground -mt-2">
@@ -873,43 +1107,56 @@ function goToSummary() {
         <!-- 英文句子 -->
         <div class="bg-card rounded-xl p-4 border border-border">
           <p class="text-xs text-muted-foreground mb-2">英文原句</p>
-          <p
-            ref="sentenceInteractRef"
-            class="text-foreground leading-relaxed text-lg relative overflow-visible [overflow-wrap:anywhere]"
-            :class="[
-              constituentMode || notePickMode ? 'touch-pan-y select-none' : '',
-              dragState ? 'touch-none' : ''
-            ]"
-            style="-webkit-user-select: none; user-select: none"
-            @pointerdown="onSentencePointerDown"
-            @pointermove="onSentencePointerMove"
-            @pointerup="onSentencePointerUp"
-            @pointercancel="onSentencePointerCancel"
-          >
-            <template v-for="(p, pi) in interactivePieces" :key="`${p.kind}-${p.start}-${p.end}`">
-              <span
-                v-if="p.kind === 'space'"
-                class="whitespace-pre select-none inline-block align-baseline"
-                :style="spaceBridgeOverlay(pi)"
-                >{{ p.text }}</span
-              >
-              <span
-                v-else
-                class="relative inline-block align-baseline max-w-full overflow-visible transition-shadow"
-                :class="[
-                  wordPieceClasses(p),
-                  constituentMode && p.constituent ? 'cursor-pointer' : '',
-                  constituentWordDragPreviewClass(p)
-                ]"
-                :style="wordOverlayStyle(p)"
-                :data-sp-start="String(p.start)"
-                :data-sp-end="String(p.end)"
-                :ref="(el) => setWordElRef(p, el)"
-                @click="onWordPieceClick(p, $event)"
-                >{{ p.text }}</span
-              >
-            </template>
-          </p>
+          <div ref="doodleWrapRef" class="relative">
+            <p
+              ref="sentenceInteractRef"
+              class="text-foreground leading-relaxed text-lg relative overflow-visible [overflow-wrap:anywhere]"
+              :class="[
+                constituentMode || notePickMode ? 'touch-pan-y select-none' : '',
+                dragState ? 'touch-none' : '',
+                doodleMode ? 'pointer-events-none' : ''
+              ]"
+              style="-webkit-user-select: none; user-select: none"
+              @pointerdown="onSentencePointerDown"
+              @pointermove="onSentencePointerMove"
+              @pointerup="onSentencePointerUp"
+              @pointercancel="onSentencePointerCancel"
+            >
+              <template v-for="(p, pi) in interactivePieces" :key="`${p.kind}-${p.start}-${p.end}`">
+                <span
+                  v-if="p.kind === 'space'"
+                  class="whitespace-pre select-none inline-block align-baseline"
+                  :style="spaceBridgeOverlay(pi)"
+                  >{{ p.text }}</span
+                >
+                <span
+                  v-else
+                  class="relative inline-block align-baseline max-w-full overflow-visible transition-shadow"
+                  :class="[
+                    wordPieceClasses(p),
+                    constituentMode && p.constituent ? 'cursor-pointer' : '',
+                    constituentWordDragPreviewClass(p)
+                  ]"
+                  :style="wordOverlayStyle(p)"
+                  :data-sp-start="String(p.start)"
+                  :data-sp-end="String(p.end)"
+                  :ref="(el) => setWordElRef(p, el)"
+                  @click="onWordPieceClick(p, $event)"
+                  >{{ p.text }}</span
+                >
+              </template>
+            </p>
+            <canvas
+              v-show="doodleMode"
+              ref="doodleCanvasRef"
+              class="absolute inset-0 z-[2] h-full w-full touch-none select-none cursor-crosshair pointer-events-auto rounded-sm"
+              aria-label="涂鸦画布"
+              @pointerdown="onDoodlePointerDown"
+              @pointermove="onDoodlePointerMove"
+              @pointerup="onDoodlePointerUp"
+              @pointercancel="onDoodlePointerCancel"
+            />
+          </div>
           
           <!-- 生词选择提示 -->
           <p v-if="selectedWords.length > 0" class="text-xs text-muted-foreground mt-3">
