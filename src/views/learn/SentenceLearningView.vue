@@ -6,7 +6,15 @@ import type { CustomWordInput } from '@/types'
 import { learningApi } from '@/api/learning'
 import AppButton from '@/components/common/AppButton.vue'
 
-/** 本地浅蓝划分（不落库） */
+/** 划成分：连续浅蓝底；批注：红色底边线（与划成分可叠放、线不被底遮挡） */
+const CONSTITUENT_BG = 'rgba(186, 230, 253, 0.55)'
+const CONSTITUENT_BG_SOFT = 'rgba(186, 230, 253, 0.45)'
+const CONSTITUENT_BRIDGE_BG = 'rgba(186, 230, 253, 0.52)'
+const NOTE_UNDER_SOLID = '2px solid rgb(220, 38, 38)'
+const NOTE_UNDER_DASH = '2px dashed rgba(220, 38, 38, 0.82)'
+const NOTE_UNDER_PAD_BOTTOM = '3px'
+
+/** 本地划分（浅蓝底，不落库） */
 type HighlightRange = { id: string; start: number; end: number }
 type CharSpan = { start: number; end: number }
 /** 批注锚在句中字符区间（可多段），不落库 */
@@ -412,7 +420,7 @@ function wordInDragPreview(w: SentencePiece & { kind: 'word' }) {
   return pieceOverlapsCharRange(w, prev.lo, prev.hi)
 }
 
-/** 空格两侧词同属一段高亮时铺满背景，避免「断裂」 */
+/** 空格：划成分蓝底与批注红线可叠加，避免缝与错位 */
 function spaceBridgeOverlay(pi: number): Record<string, string> {
   const arr = interactivePieces.value
   const p = arr[pi]
@@ -420,31 +428,36 @@ function spaceBridgeOverlay(pi: number): Record<string, string> {
   const [wa, wb] = neighborWordPieces(pi)
   if (!wa || !wb) return {}
 
+  let note: Record<string, string> | null = null
   if (wordInNotePick(wa) && wordInNotePick(wb)) {
-    return {
-      borderBottom: '2px solid rgba(2, 132, 199, 0.85)',
-      paddingBottom: '1px'
-    }
+    note = noteSpaceBridgeStyle(NOTE_UNDER_SOLID)
+  } else if (isWordInSavedAnnotation(wa) && isWordInSavedAnnotation(wb) && wordsShareSavedAnnotation(wa, wb)) {
+    note = noteSpaceBridgeStyle(NOTE_UNDER_SOLID)
+  } else if (wordInDragPreview(wa) && wordInDragPreview(wb) && notePickMode.value) {
+    note = noteSpaceBridgeStyle(NOTE_UNDER_DASH)
   }
-  if (isWordInSavedAnnotation(wa) && isWordInSavedAnnotation(wb) && wordsShareSavedAnnotation(wa, wb)) {
-    return {
-      borderBottom: '2px solid rgba(2, 132, 199, 0.85)',
-      paddingBottom: '1px'
-    }
-  }
-  if (wordInDragPreview(wa) && wordInDragPreview(wb) && notePickMode.value) {
-    return {
-      borderBottom: '2px dashed rgba(14, 165, 233, 0.7)',
-      paddingBottom: '1px'
-    }
+
+  let con: Record<string, string> | null = null
+  if (wa.constituent && wb.constituent) {
+    con = { backgroundColor: CONSTITUENT_BRIDGE_BG, borderRadius: '0' }
   }
   if (wordInDragPreview(wa) && wordInDragPreview(wb) && constituentMode.value && !notePickMode.value) {
-    return { backgroundColor: 'rgba(186, 230, 253, 0.55)' }
+    con = { backgroundColor: CONSTITUENT_BG, borderRadius: '0' }
   }
-  if (wa.constituent && wb.constituent) {
-    return { backgroundColor: 'rgba(186, 230, 253, 0.5)' }
-  }
+
+  if (con && note) return { ...con, ...note }
+  if (note) return note
+  if (con) return con
   return {}
+}
+
+function noteSpaceBridgeStyle(borderBottom: string): Record<string, string> {
+  return {
+    borderBottom,
+    paddingBottom: NOTE_UNDER_PAD_BOTTOM,
+    boxSizing: 'border-box',
+    borderRadius: '0'
+  }
 }
 
 function cleanToken(raw: string) {
@@ -454,37 +467,39 @@ function cleanToken(raw: string) {
 function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   const clean = cleanToken(p.text)
   const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
+  const vocabSel = !!(clean && selectedWords.value.includes(clean))
   const base: Record<string, boolean> = {
     'cursor-pointer hover:text-primary transition-colors': true,
-    'rounded px-0.5': true
+    /** 水平无留白，避免蓝底块之间露出卡片底色形成「接缝」 */
+    'px-0': true,
+    'rounded-none': !(vocabSel || inNotePick)
   }
   if (inNotePick) {
     return {
       ...base,
-      'text-sky-900 dark:text-sky-100': true
+      'rounded-none': true
     }
   }
-  if (clean && selectedWords.value.includes(clean)) {
+  if (vocabSel) {
     return {
       ...base,
-      'bg-sky-100 text-sky-700': true
+      'rounded px-0.5 bg-sky-100 text-sky-700': true,
+      'rounded-none': false
     }
   }
   return base
 }
 
-function noteUnderlineStyle(style: 'solid' | 'dashed') {
+/** 批注用底边线（不用 text-decoration，避免被同一元素上的浅蓝底盖住） */
+function noteLineStyle(style: 'solid' | 'dashed'): Record<string, string> {
   return {
-    textDecoration: 'underline',
-    textDecorationThickness: '2px',
-    textUnderlineOffset: '3px',
-    textDecorationColor:
-      style === 'dashed' ? 'rgba(14, 165, 233, 0.75)' : 'rgba(2, 132, 199, 0.92)',
-    textDecorationStyle: style
-  } as Record<string, string>
+    borderBottom: style === 'dashed' ? NOTE_UNDER_DASH : NOTE_UNDER_SOLID,
+    paddingBottom: NOTE_UNDER_PAD_BOTTOM,
+    boxSizing: 'border-box'
+  }
 }
 
-/** 划成分：浅蓝底；批注：下划线（不铺蓝底） */
+/** 划成分：连续浅蓝底（无圆角拼接）；批注：红色底边线 */
 function wordOverlayStyle(p: SentencePiece & { kind: 'word' }) {
   const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
   const prev = dragPreviewLoHi.value
@@ -494,34 +509,36 @@ function wordOverlayStyle(p: SentencePiece & { kind: 'word' }) {
     pieceOverlapsCharRange(p, prev.lo, prev.hi)
 
   if (inNotePick) {
-    return noteUnderlineStyle('solid')
+    const line = { ...noteLineStyle('solid'), borderRadius: '0' as const }
+    if (p.constituent) return { ...line, backgroundColor: CONSTITUENT_BG_SOFT }
+    return line
   }
   if (inPreview && notePickMode.value) {
-    return noteUnderlineStyle('dashed')
+    const line = { ...noteLineStyle('dashed'), borderRadius: '0' as const }
+    if (p.constituent) return { ...line, backgroundColor: CONSTITUENT_BG_SOFT }
+    return line
   }
   if (inPreview && constituentMode.value && !notePickMode.value) {
     return {
-      backgroundColor: 'rgba(186, 230, 253, 0.58)',
-      borderRadius: '2px',
-      boxShadow: 'inset 0 0 0 1px rgba(56, 189, 248, 0.35)'
+      backgroundColor: CONSTITUENT_BG,
+      borderRadius: '0'
     }
   }
   if (isWordInSavedAnnotation(p)) {
-    const line = noteUnderlineStyle('solid')
+    const line = noteLineStyle('solid')
     if (p.constituent) {
       return {
         ...line,
-        backgroundColor: 'rgba(186, 230, 253, 0.42)',
-        borderRadius: '2px'
+        backgroundColor: CONSTITUENT_BG_SOFT,
+        borderRadius: '0'
       }
     }
-    return line
+    return { ...line, borderRadius: '0' }
   }
   if (p.constituent) {
     return {
-      backgroundColor: 'rgba(186, 230, 253, 0.5)',
-      borderRadius: '2px',
-      boxShadow: 'inset 0 0 0 1px rgba(56, 189, 248, 0.25)'
+      backgroundColor: CONSTITUENT_BG,
+      borderRadius: '0'
     }
   }
   return {}
@@ -829,13 +846,13 @@ function goToSummary() {
           </button>
         </div>
         <p v-if="constituentMode && !notePickMode" class="text-xs text-muted-foreground -mt-2">
-          划成分：<strong>浅蓝底</strong>标出语法块；点/滑跨选有<strong>浅蓝预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除相交划分。此模式下不可查义。
+          划成分：<strong>连续浅蓝底</strong>标出语法块；点/滑跨选有<strong>浅蓝预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除相交划分。此模式下不可查义。
         </p>
         <p v-else-if="notePickMode && !constituentMode" class="text-xs text-muted-foreground -mt-2">
-          批注：选词以<strong>下划线</strong>标示（滑动时虚线预览）→「填写批注」；已保存同样为下划线、不铺蓝底。
+          批注：选词以<strong>红色连线</strong>标示（滑动时红色虚线预览）→「填写批注」；已保存同样为红线、不铺底色。
         </p>
         <p v-else-if="constituentMode && notePickMode" class="text-xs text-muted-foreground -mt-2">
-          <strong>划成分</strong>（浅蓝底）与<strong>批注</strong>（下划线）可同时用：点/滑<strong>优先批注</strong>；关闭「批注选词」后再划成分。已划蓝段上可加下划线批注。划成分下单击调划分、双击已划词可清相交划分。
+          <strong>划成分</strong>（连续浅蓝底）与<strong>批注</strong>（红色底边线）可同时用，红线不会被蓝底盖住。点/滑<strong>优先批注</strong>；关闭「批注选词」后再划成分。划成分下单击调划分、双击已划词可清相交划分。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
           未提交翻译时点词只用于选生词、不弹释义；提交后可点词查义。电脑也可
@@ -872,7 +889,7 @@ function goToSummary() {
             <template v-for="(p, pi) in interactivePieces" :key="`${p.kind}-${p.start}-${p.end}`">
               <span
                 v-if="p.kind === 'space'"
-                class="whitespace-pre select-none"
+                class="whitespace-pre select-none inline-block align-baseline"
                 :style="spaceBridgeOverlay(pi)"
                 >{{ p.text }}</span
               >
