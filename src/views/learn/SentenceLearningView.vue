@@ -6,7 +6,7 @@ import type { CustomWordInput } from '@/types'
 import { learningApi } from '@/api/learning'
 import AppButton from '@/components/common/AppButton.vue'
 
-/** 本地浅红划分（不落库） */
+/** 本地浅蓝划分（不落库） */
 type HighlightRange = { id: string; start: number; end: number }
 type CharSpan = { start: number; end: number }
 /** 批注锚在句中字符区间（可多段），不落库 */
@@ -421,16 +421,28 @@ function spaceBridgeOverlay(pi: number): Record<string, string> {
   if (!wa || !wb) return {}
 
   if (wordInNotePick(wa) && wordInNotePick(wb)) {
-    return { backgroundColor: 'rgba(224, 242, 254, 0.75)' }
+    return {
+      borderBottom: '2px solid rgba(2, 132, 199, 0.85)',
+      paddingBottom: '1px'
+    }
   }
   if (isWordInSavedAnnotation(wa) && isWordInSavedAnnotation(wb) && wordsShareSavedAnnotation(wa, wb)) {
-    return { backgroundColor: 'rgba(224, 242, 254, 0.55)' }
+    return {
+      borderBottom: '2px solid rgba(2, 132, 199, 0.85)',
+      paddingBottom: '1px'
+    }
   }
-  if (wordInDragPreview(wa) && wordInDragPreview(wb) && (constituentMode.value || notePickMode.value)) {
-    return { backgroundColor: 'rgba(254, 226, 226, 0.65)' }
+  if (wordInDragPreview(wa) && wordInDragPreview(wb) && notePickMode.value) {
+    return {
+      borderBottom: '2px dashed rgba(14, 165, 233, 0.7)',
+      paddingBottom: '1px'
+    }
+  }
+  if (wordInDragPreview(wa) && wordInDragPreview(wb) && constituentMode.value && !notePickMode.value) {
+    return { backgroundColor: 'rgba(186, 230, 253, 0.55)' }
   }
   if (wa.constituent && wb.constituent) {
-    return { backgroundColor: 'rgba(254, 202, 202, 0.5)' }
+    return { backgroundColor: 'rgba(186, 230, 253, 0.5)' }
   }
   return {}
 }
@@ -461,40 +473,55 @@ function wordPieceClasses(p: SentencePiece & { kind: 'word' }) {
   return base
 }
 
-/** 已保存批注 / 选词 / 滑动预览：内联颜色；预览统一浅红 */
+function noteUnderlineStyle(style: 'solid' | 'dashed') {
+  return {
+    textDecoration: 'underline',
+    textDecorationThickness: '2px',
+    textUnderlineOffset: '3px',
+    textDecorationColor:
+      style === 'dashed' ? 'rgba(14, 165, 233, 0.75)' : 'rgba(2, 132, 199, 0.92)',
+    textDecorationStyle: style
+  } as Record<string, string>
+}
+
+/** 划成分：浅蓝底；批注：下划线（不铺蓝底） */
 function wordOverlayStyle(p: SentencePiece & { kind: 'word' }) {
   const inNotePick = notePickSpans.value.some((s: CharSpan) => spansEqual(s, { start: p.start, end: p.end }))
-  if (inNotePick) {
-    return {
-      backgroundColor: 'rgba(224, 242, 254, 0.75)',
-      borderRadius: '2px'
-    }
-  }
-
   const prev = dragPreviewLoHi.value
   const inPreview =
     prev != null &&
     (constituentMode.value || notePickMode.value) &&
     pieceOverlapsCharRange(p, prev.lo, prev.hi)
-  // 划成分、批注选词下滑动预览均为浅红（降低饱和度）
-  if (inPreview && (constituentMode.value || notePickMode.value)) {
+
+  if (inNotePick) {
+    return noteUnderlineStyle('solid')
+  }
+  if (inPreview && notePickMode.value) {
+    return noteUnderlineStyle('dashed')
+  }
+  if (inPreview && constituentMode.value && !notePickMode.value) {
     return {
-      backgroundColor: 'rgba(254, 226, 226, 0.65)',
-      boxShadow: 'inset 0 0 0 1px rgba(252, 165, 165, 0.35)',
-      borderRadius: '2px'
+      backgroundColor: 'rgba(186, 230, 253, 0.58)',
+      borderRadius: '2px',
+      boxShadow: 'inset 0 0 0 1px rgba(56, 189, 248, 0.35)'
     }
   }
   if (isWordInSavedAnnotation(p)) {
-    return {
-      backgroundColor: 'rgba(224, 242, 254, 0.55)',
-      borderRadius: '2px',
-      boxShadow: p.constituent ? 'inset 0 0 0 1px rgba(251, 113, 133, 0.5)' : undefined
+    const line = noteUnderlineStyle('solid')
+    if (p.constituent) {
+      return {
+        ...line,
+        backgroundColor: 'rgba(186, 230, 253, 0.42)',
+        borderRadius: '2px'
+      }
     }
+    return line
   }
   if (p.constituent) {
     return {
-      backgroundColor: 'rgba(254, 202, 202, 0.5)',
-      borderRadius: '2px'
+      backgroundColor: 'rgba(186, 230, 253, 0.5)',
+      borderRadius: '2px',
+      boxShadow: 'inset 0 0 0 1px rgba(56, 189, 248, 0.25)'
     }
   }
   return {}
@@ -504,7 +531,7 @@ function constituentWordDragPreviewClass(p: SentencePiece & { kind: 'word' }) {
   const prev = dragPreviewLoHi.value
   if (!prev || !constituentMode.value || notePickMode.value) return {}
   if (!p.constituent || !pieceOverlapsCharRange(p, prev.lo, prev.hi)) return {}
-  return { 'ring-2 ring-red-400/45 ring-inset': true }
+  return { 'ring-2 ring-sky-400/50 ring-inset': true }
 }
 
 function resetLocalAnnotationState() {
@@ -802,13 +829,13 @@ function goToSummary() {
           </button>
         </div>
         <p v-if="constituentMode && !notePickMode" class="text-xs text-muted-foreground -mt-2">
-          划成分：点词或<strong>滑动</strong>跨选，<strong>浅红预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除与该词相交的划分。此模式下不可查义。
+          划成分：<strong>浅蓝底</strong>标出语法块；点/滑跨选有<strong>浅蓝预览</strong>；单击词加/取消划分；<strong>双击</strong>已划词可清除相交划分。此模式下不可查义。
         </p>
         <p v-else-if="notePickMode && !constituentMode" class="text-xs text-muted-foreground -mt-2">
-          批注：点/滑多选（<strong>浅红预览</strong>）→「填写批注」；弹窗打开时不能再增选。已保存为<strong>浅蓝底连片</strong>。
+          批注：选词以<strong>下划线</strong>标示（滑动时虚线预览）→「填写批注」；已保存同样为下划线、不铺蓝底。
         </p>
         <p v-else-if="constituentMode && notePickMode" class="text-xs text-muted-foreground -mt-2">
-          <strong>划成分</strong>与<strong>批注选词</strong>已同时开启：点/滑<strong>优先批注</strong>；关闭「批注选词」后，点/滑再用于划成分。已划红段上仍可批注。划成分下单击调划分、双击已划词可清相交划分。
+          <strong>划成分</strong>（浅蓝底）与<strong>批注</strong>（下划线）可同时用：点/滑<strong>优先批注</strong>；关闭「批注选词」后再划成分。已划蓝段上可加下划线批注。划成分下单击调划分、双击已划词可清相交划分。
         </p>
         <p v-else class="text-xs text-muted-foreground -mt-2">
           未提交翻译时点词只用于选生词、不弹释义；提交后可点词查义。电脑也可
